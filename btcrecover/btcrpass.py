@@ -33,7 +33,7 @@ __version__          =  "0.17.10"
 __ordering_version__ = b"0.6.4"  # must be updated whenever password ordering changes
 
 import sys, argparse, itertools, string, re, multiprocessing, signal, os, cPickle, gc, \
-       time, timeit, hashlib, collections, base64, struct, atexit, zlib, math, json, numbers
+    time, timeit, hashlib, collections, base64, struct, atexit, zlib, math, json, numbers
 
 # The progressbar module is recommended but optional; it is typically
 # distributed with btcrecover (it is loaded later on demand)
@@ -49,125 +49,12 @@ def full_version():
         sys.maxint.bit_length() + 1
     )
 
+import btcrecover.modules.mode as mode
 
-# One of these two is typically called relatively early by parse_arguments()
-def enable_unicode_mode():
-    global io, tstr, tstr_from_stdin, tchr
-    import locale, io
-    tstr              = unicode
-    preferredencoding = locale.getpreferredencoding()
-    tstr_from_stdin   = lambda s: s if isinstance(s, unicode) else unicode(s, preferredencoding)
-    tchr              = unichr
-#
-def enable_ascii_mode():
-    global io, tstr, tstr_from_stdin, tchr
-    io              = None
-    tstr            = str
-    tstr_from_stdin = str
-    tchr            = chr
+enable_ascii_mode = mode.enable_ascii_mode
+enable_unicode_mode = mode.enable_unicode_mode
 
-
-################################### Configurables/Plugins ###################################
-# wildcard sets, simple typo generators, and wallet support functions
-
-
-# Recognized wildcard (e.g. %d, %a) types mapped to their associated sets
-# of characters; used in expand_wildcards_generator()
-# warning: these can't be the key for a wildcard set: digits 'i' 'b' '[' ',' ';' '-' '<' '>'
-def init_wildcards():
-    global wildcard_sets, wildcard_keys, wildcard_nocase_sets, wildcard_re, \
-           custom_wildcard_cache, backreference_maps, backreference_maps_sha1
-    # N.B. that tstr() will not convert string.*case to Unicode correctly if the locale has
-    # been set to one with a single-byte code page e.g. ISO-8859-1 (Latin1) or Windows-1252
-    wildcard_sets = {
-        tstr("d") : tstr(string.digits),
-        tstr("a") : tstr(string.lowercase),
-        tstr("A") : tstr(string.uppercase),
-        tstr("n") : tstr(string.lowercase + string.digits),
-        tstr("N") : tstr(string.uppercase + string.digits),
-        tstr("s") : tstr(" "),        # space
-        tstr("l") : tstr("\n"),       # line feed
-        tstr("r") : tstr("\r"),       # carriage return
-        tstr("R") : tstr("\n\r"),     # newline characters
-        tstr("t") : tstr("\t"),       # tab
-        tstr("T") : tstr(" \t"),      # space and tab
-        tstr("w") : tstr(" \r\n"),    # space and newline characters
-        tstr("W") : tstr(" \r\n\t"),  # space, newline, and tab
-        tstr("y") : tstr(string.punctuation),
-        tstr("Y") : tstr(string.digits + string.punctuation),
-        tstr("p") : tstr().join(map(tchr, xrange(33, 127))),  # all ASCII printable characters except whitespace
-        tstr("P") : tstr().join(map(tchr, xrange(33, 127))) + tstr(" \r\n\t"),  # as above, plus space, newline, and tab
-        # wildcards can be used to escape these special symbols
-        tstr("%") : tstr("%"),
-        tstr("^") : tstr("^"),
-        tstr("S") : tstr("$")  # the key is intentionally a capital "S", the value is a dollar sign
-    }
-    wildcard_keys = tstr().join(wildcard_sets)
-    #
-    # case-insensitive versions (e.g. %ia) of wildcard_sets for those which have them
-    wildcard_nocase_sets = {
-        tstr("a") : tstr(string.lowercase + string.uppercase),
-        tstr("A") : tstr(string.uppercase + string.lowercase),
-        tstr("n") : tstr(string.lowercase + string.uppercase + string.digits),
-        tstr("N") : tstr(string.uppercase + string.lowercase + string.digits)
-    }
-    #
-    wildcard_re = None
-    custom_wildcard_cache   = dict()
-    backreference_maps      = dict()
-    backreference_maps_sha1 = None
-
-
-# Simple typo generators produce (as an iterable, e.g. a tuple, generator, etc.)
-# zero or more alternative typo strings which can replace a single character. If
-# more than one string is produced, all combinations are tried. If zero strings are
-# produced (e.g. an empty tuple), then the specified input character has no typo
-# alternatives that can be tried (e.g. you can't change the case of a caseless char).
-# They are called with the full password and an index into that password of the
-# character which will be replaced.
-#
-def typo_repeat(p, i): return 2 * p[i],  # A single replacement of len 2.
-def typo_delete(p, i): return tstr(""),  # A single replacement of len 0.
-def typo_case(p, i):                     # Returns a single replacement or no
-    swapped = p[i].swapcase()            # replacement if it's a caseless char.
-    return (swapped,) if swapped != p[i] else ()
-#
-def typo_closecase(p, i):  #  Returns a swapped case only when case transitions are nearby
-    cur_case_id = case_id_of(p[i])  # (case_id functions defined in the Password Generation section)
-    if cur_case_id == UNCASED_ID: return ()
-    if i==0 or i+1==len(p) or \
-            case_id_changed(case_id_of(p[i-1]), cur_case_id) or \
-            case_id_changed(case_id_of(p[i+1]), cur_case_id):
-        return p[i].swapcase(),
-    return ()
-#
-def typo_replace_wildcard(p, i): return [e for e in typos_replace_expanded if e != p[i]]
-def typo_map(p, i):              return typos_map.get(p[i], ())
-# (typos_replace_expanded and typos_map are initialized from args.typos_replace
-# and args.typos_map respectively in parse_arguments() )
-#
-# a dict: command line argument name is: "typos-" + key_name; associated value is
-# the generator function from above; this dict MUST BE ORDERED to prevent the
-# breakage of --skip and --restore features (the order can be arbitrary, but it
-# MUST be repeatable across runs and preferably across implementations)
-simple_typos = collections.OrderedDict()
-simple_typos["repeat"]    = typo_repeat
-simple_typos["delete"]    = typo_delete
-simple_typos["case"]      = typo_case
-simple_typos["closecase"] = typo_closecase
-simple_typos["replace"]   = typo_replace_wildcard
-simple_typos["map"]       = typo_map
-#
-# a dict: typo name (matches typo names in the dict above) mapped to the options
-# that are passed to add_argument; this dict is only ordered for cosmetic reasons
-simple_typo_args = collections.OrderedDict()
-simple_typo_args["repeat"]    = dict( action="store_true",       help="repeat (double) a character" )
-simple_typo_args["delete"]    = dict( action="store_true",       help="delete a character" )
-simple_typo_args["case"]      = dict( action="store_true",       help="change the case (upper/lower) of a letter" )
-simple_typo_args["closecase"] = dict( action="store_true",       help="like --typos-case, but only change letters next to those with a different case")
-simple_typo_args["map"]       = dict( metavar="FILE",            help="replace specific characters based on a map file" )
-simple_typo_args["replace"]   = dict( metavar="WILDCARD-STRING", help="replace a character with another string or wildcard" )
-
+import btcrecover.modules.configurables as config
 
 # A class decorator which adds a wallet class to the registered list
 wallet_types       = []
@@ -187,7 +74,6 @@ def clear_registered_wallets():
     global wallet_types, wallet_types_by_id
     wallet_types       = []
     wallet_types_by_id = {}
-
 
 # The max wallet file size in bytes (prevents trying to load huge files which clearly aren't wallets)
 MAX_WALLET_FILE_SIZE = 64 * 2**20  # 64 MiB
@@ -324,7 +210,7 @@ def add_armory_library_path():
 
 is_armory_loaded = False
 def load_armory_library():
-    if tstr == unicode:
+    if mode.tstr == unicode:
         error_exit("armory wallets do not support unicode; please remove the --utf8 option")
     global is_armory_loaded
     if is_armory_loaded: return
@@ -405,11 +291,11 @@ class WalletArmory(object):
 
     def __setstate__(self, state):
         # Restore unpicklable Armory library objects
-        global tstr
+        # global mode.tstr
         try:
-            assert tstr == str  # load_armory_library() requires this;
-        except NameError:       # but tstr doesn't exist when using multiprocessing on Windows
-            tstr = str          # so apply this workaround
+            assert mode.tstr == str  # load_armory_library() requires this;
+        except NameError:       # but mode.tstr doesn't exist when using multiprocessing on Windows
+            mode.tstr = str          # so apply this workaround
         load_armory_library()
         #
         state["_address"] = PyBtcAddress().createFromEncryptedKeyData(
@@ -474,7 +360,7 @@ class WalletArmory(object):
             return False, count
 
     # Load and initialize the OpenCL kernel for Armory, given the global wallet and these params:
-    #   devices   - a list of one or more of the devices returned by get_opencl_devices()
+    #   devices   - a list of one or more of the devices returned by config.get_opencl_devices()
     #   global_ws - a list of global work sizes, exactly one per device
     #   local_ws  - a list of local work sizes (or Nones), exactly one per device
     #   int_rate  - number of times to interrupt calculations to prevent hanging
@@ -798,7 +684,7 @@ class WalletBitcoinCore(object):
         l_sha512 = hashlib.sha512
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
@@ -809,12 +695,12 @@ class WalletBitcoinCore(object):
             #
             # If the last block (bytes 16-31) of part_encrypted_master_key is all padding, we've found it
             if part_master_key == b"\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10":
-                return password if tstr == str else password.decode("utf_8", "replace"), count
+                return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
     # Load and initialize the OpenCL kernel for Bitcoin Core, given:
-    #   devices - a list of one or more of the devices returned by get_opencl_devices()
+    #   devices - a list of one or more of the devices returned by config.get_opencl_devices()
     #   global_ws - a list of global work sizes, exactly one per device
     #   local_ws  - a list of local work sizes (or Nones), exactly one per device
     #   int_rate  - number of times to interrupt calculations to prevent hanging
@@ -866,7 +752,7 @@ class WalletBitcoinCore(object):
         assert len(passwords) <= sum(self._cl_global_ws), "WalletBitcoinCore.return_verified_password_or_false_opencl: at most --global-ws passwords"
 
         # Convert Unicode strings to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = map(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         # The first iter_count iteration is done by the CPU
@@ -925,7 +811,7 @@ class WalletBitcoinCore(object):
             part_master_key = aes256_cbc_decrypt(derived_key[:32], self._part_encrypted_master_key[:16], self._part_encrypted_master_key[16:])
             # If the last block (bytes 16-31) of part_encrypted_master_key is all padding, we've found it
             if part_master_key == b"\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10":
-                return password if tstr == str else password.decode("utf_8", "replace"), i + 1
+                return password if mode.tstr == str else password.decode("utf_8", "replace"), i + 1
         return False, i + 1
 
 
@@ -1073,7 +959,7 @@ class WalletMultiBit(object):
         salt                  = self._salt
 
         # Convert Unicode strings (lazily) to UTF-16 bytestrings, truncating each code unit to 8 bits
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_16_le", "ignore")[::2], orig_passwords)
         else:
             passwords = orig_passwords
@@ -1249,7 +1135,7 @@ class WalletBitcoinj(object):
             # If the last block (bytes 16-31) of part_encrypted_key is all padding, we've found it
             if part_key == b"\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10":
                 password = password.decode("utf_16_be", "replace")
-                return password.encode("ascii", "replace") if tstr == str else password, count
+                return password.encode("ascii", "replace") if mode.tstr == str else password, count
 
         return False, count
 
@@ -1332,7 +1218,7 @@ class WalletMultiBitHD(WalletBitcoinj):
             for block in (block_iv, block_noiv):
                 if block[2:6] == b"org." and block[0] == b"\x0a" and ord(block[1]) < 128:
                     password = password.decode("utf_16_be", "replace")
-                    return password.encode("ascii", "replace") if tstr == str else password, count
+                    return password.encode("ascii", "replace") if mode.tstr == str else password, count
 
         return False, count
 
@@ -1366,7 +1252,7 @@ class WalletAndroidSpendingPIN(WalletBitcoinj):
         data = data[16:]
 
         if not password:
-            password = prompt_unicode_password(
+            password = config.prompt_unicode_password(
                 b"Please enter the password for the Bitcoin Wallet for Android/BlackBerry backup: ",
                 "encrypted Bitcoin Wallet for Android/BlackBerry backups must be decrypted before searching for the PIN")
         # Convert Unicode string to a UTF-16 bytestring, truncating each code unit to 8 bits
@@ -1482,7 +1368,7 @@ class WalletMsigna(object):
         salt                   = self._salt
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
@@ -1502,7 +1388,7 @@ class WalletMsigna(object):
             #
             # If the last block (bytes 16-31) of part_encrypted_privkey is all padding, we've found it
             if part_privkey == b"\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10":
-                return password if tstr == str else password.decode("utf_8", "replace"), count
+                return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -1558,7 +1444,7 @@ class WalletElectrum1(WalletElectrum):
             try:
                 wallet = literal_eval(wallet_file.read(MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
             except SyntaxError as e:  # translate any SyntaxError into a
-                raise ValueError(e)   # ValueError as expected by load_wallet()
+                raise ValueError(e)   # ValueError as expected by config.load_wallet()
         return cls._load_from_dict(wallet)
 
     @classmethod
@@ -1585,7 +1471,7 @@ class WalletElectrum1(WalletElectrum):
         iv                   = self._iv
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
@@ -1595,7 +1481,7 @@ class WalletElectrum1(WalletElectrum):
             for c in seed:
                 if c > b"f" or c < b"0" or b"9" < c < b"a": break  # not hex
             else:  # if the loop above doesn't break, it's all hex
-                return password if tstr == str else password.decode("utf_8", "replace"), count
+                return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -1726,7 +1612,7 @@ class WalletElectrum2(WalletElectrum):
         iv                   = self._iv
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
@@ -1738,7 +1624,7 @@ class WalletElectrum2(WalletElectrum):
                     # If it's outside of the base58 set [1-9A-HJ-NP-Za-km-z]
                     if c > b"z" or c < b"1" or b"9" < c < b"A" or b"Z" < c < b"a" or c in b"IOl": break  # not base58
                 else:  # if the loop above doesn't break, it's base58
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -1763,7 +1649,7 @@ class WalletElectrumLooseKey(WalletElectrum):
         iv                    = self._iv
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
@@ -1777,7 +1663,7 @@ class WalletElectrumLooseKey(WalletElectrum):
                     # If it's outside of the base58 set [1-9A-HJ-NP-Za-km-z]
                     if c > b"z" or c < b"1" or b"9" < c < b"A" or b"Z" < c < b"a" or c in b"IOl": break  # not base58
                 else:  # if the loop above doesn't break, it's base58
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -1850,7 +1736,7 @@ class WalletElectrum28(object):
         cutils = coincurve.utils
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
@@ -1878,7 +1764,7 @@ class WalletElectrum28(object):
             # Check the MAC
             computed_mac = hmac.new(keys[32:], self._all_but_mac, hashlib.sha256).digest()
             if computed_mac == self._mac:
-                return password if tstr == str else password.decode("utf_8", "replace"), count
+                return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -2007,7 +1893,7 @@ class WalletBlockchain(object):
         iter_count           = self._iter_count
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = map(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         v0 = not iter_count     # version 0.0 wallets don't specify an iter_count
@@ -2018,7 +1904,7 @@ class WalletBlockchain(object):
             # A bit fragile because it assumes the guid is in the first encrypted block,
             # although this has always been the case as of 6/2014 (since 12/2011)
             if unencrypted_block[0] == b"{" and b'"guid"' in unencrypted_block:
-                return password if tstr == str else password.decode("utf_8", "replace"), count
+                return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         if v0:
             # Try the older encryption schemes possibly used in v0.0 wallets
@@ -2026,10 +1912,10 @@ class WalletBlockchain(object):
                 key = l_pbkdf2_hmac(b"sha1", password, salt_and_iv, 1, 32)                   # only 1 iteration
                 unencrypted_block = l_aes256_cbc_decrypt(key, salt_and_iv, encrypted_block)  # CBC mode
                 if unencrypted_block[0] == b"{" and b'"guid"' in unencrypted_block:
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
                 unencrypted_block = l_aes256_ofb_decrypt(key, salt_and_iv, encrypted_block)  # OFB mode
                 if unencrypted_block[0] == b"{" and b'"guid"' in unencrypted_block:
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -2066,7 +1952,7 @@ class WalletBlockchainSecondpass(WalletBlockchain):
         else:
             # If there were no problems getting the encrypted data, decrypt it
             if not password:
-                password = prompt_unicode_password(
+                password = config.prompt_unicode_password(
                     b"Please enter the Blockchain wallet's main password: ",
                     "encrypted Blockchain files must be decrypted before searching for the second password")
             password = password.encode("utf_8")
@@ -2148,7 +2034,7 @@ class WalletBlockchainSecondpass(WalletBlockchain):
         iter_count    = self._iter_count
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
 
         # Newer wallets specify an iter_count and use something similar to PBKDF1 with SHA-256
@@ -2158,7 +2044,7 @@ class WalletBlockchainSecondpass(WalletBlockchain):
                 for i in xrange(iter_count):
                     running_hash = l_sha256(running_hash).digest()
                 if running_hash == password_hash:
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         # Older wallets used one of three password hashing schemes
         else:
@@ -2166,15 +2052,15 @@ class WalletBlockchainSecondpass(WalletBlockchain):
                 running_hash = l_sha256(salt + password).digest()
                 # Just a single SHA-256 hash
                 if running_hash == password_hash:
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
                 # Exactly 10 hashes (the first of which was done above)
                 for i in xrange(9):
                     running_hash = l_sha256(running_hash).digest()
                 if running_hash == password_hash:
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
                 # A single unsalted hash
                 if l_sha256(password).digest() == password_hash:
-                    return password if tstr == str else password.decode("utf_8", "replace"), count
+                    return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -2342,7 +2228,7 @@ class WalletBither(object):
             # Compute the hash160 of the public key, and check for a match
             if hashlib_new("ripemd160", l_sha256(pubkey).digest()).digest() == self._pubkey_hash160:
                 password = password.decode("utf_16_be", "replace")
-                return password.encode("ascii", "replace") if tstr == str else password, count
+                return password.encode("ascii", "replace") if mode.tstr == str else password, count
 
         return False, count
 
@@ -2411,14 +2297,14 @@ class WalletBIP39(object):
     # is correct return it, else return False for item 0; return a count of passwords checked for item 1
     def return_verified_password_or_false(self, passwords):
         # Convert Unicode strings (lazily) to normalized UTF-8 bytestrings
-        if tstr == unicode:
+        if mode.tstr == unicode:
             passwords = itertools.imap(lambda p: normalize("NFKD", p).encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
             seed_bytes = pbkdf2_hmac(b"sha512", self._mnemonic, b"mnemonic" + password, 2048)
             seed_bytes = hmac.new(b"Bitcoin seed", seed_bytes, hashlib.sha512).digest()
             if self.btcrseed_wallet._verify_seed(seed_bytes):
-                return password if tstr == str else password.decode("utf_8", "replace"), count
+                return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
 
@@ -2535,8 +2421,8 @@ def error_exit(*messages):
 
 # Ensures all chars in the string fall inside the acceptable range for the current mode
 def check_chars_range(s, error_msg, no_replacement_chars=False):
-    assert isinstance(s, tstr), "check_chars_range: s is of " + unicode(tstr)
-    if tstr == str:
+    assert isinstance(s, mode.tstr), "check_chars_range: s is of " + unicode(mode.tstr)
+    if mode.tstr == str:
         # For ASCII mode, checks that the input string's chars are all 7-bit US-ASCII
         for c in s:
             if ord(c) > 127:  # 2**7 - 1
@@ -2584,7 +2470,7 @@ def expand_single_range(m):
     char_first, char_last = map(ord, m.groups())
     if char_first > char_last:
         raise ValueError("first character in wildcard range '"+unichr(char_first)+"' > last '"+unichr(char_last)+"'")
-    return tstr().join(map(tchr, xrange(char_first, char_last+1)))
+    return mode.tstr().join(map(mode.tchr, xrange(char_first, char_last+1)))
 
 # Returns an integer count of valid wildcards in the string, or
 # a string error message if any invalid wildcards are present
@@ -2594,10 +2480,10 @@ def count_valid_wildcards(str_with_wildcards, permit_contracting_wildcards = Fal
     try:
         valid_wildcards_removed, count = \
             re.subn(br"%(?:(?:(\d+),)?(\d+))?(?:i?[{}]|i?\[.+?\]{}|(?:;.+?;(\d+)?|;(\d+))?b)"
-                    .format(wildcard_keys, b"|[<>-]" if permit_contracting_wildcards else b""),
+                    .format(config.wildcard_keys, b"|[<>-]" if permit_contracting_wildcards else b""),
                     syntax_check_range, str_with_wildcards)
     except ValueError as e: return unicode(e)
-    if tstr("%") in valid_wildcards_removed:
+    if mode.tstr("%") in valid_wildcards_removed:
         invalid_wildcard_msg = "invalid wildcard (%) syntax (use %% to escape a %)"
         # If checking with permit_contracting_wildcards==True returns something different,
         # then the string must contain contracting wildcards (which were not permitted)
@@ -2613,7 +2499,7 @@ def count_valid_wildcards(str_with_wildcards, permit_contracting_wildcards = Fal
     for wildcard_set in re.findall(br"%[\d,i]*\[(.+?)\]|%%", str_with_wildcards):
         if wildcard_set:
             try:   re.sub(br"(.)-(.)", expand_single_range, wildcard_set)
-            except ValueError as e: return tstr(e)
+            except ValueError as e: return mode.tstr(e)
     return count
 #
 def syntax_check_range(m):
@@ -2625,7 +2511,7 @@ def syntax_check_range(m):
     if bpos2: bpos = bpos2  # at most one of these is not None
     if bpos and int(bpos) == 0:
         raise ValueError("backreference wildcard position must be > 0")
-    return tstr("")
+    return mode.tstr("")
 
 
 # Loads the savestate from the more recent save slot in an autosave_file (into a global)
@@ -2704,12 +2590,12 @@ class MakePeekable(object):
         return self._peeked
     #
     def read(self, size = -1):
-        if size == 0: return tstr("")
+        if size == 0: return mode.tstr("")
         peeked = self._peeked
         self._peeked = b""
         return peeked + self._file.read(size - 1) if peeked else self._file.read(size)
     def readline(self, size = -1):
-        if size == 0: return tstr("")
+        if size == 0: return mode.tstr("")
         peeked = self._peeked
         self._peeked = b""
         if peeked == b"\n": return peeked # A blank Unix-style line (or OS X)
@@ -2754,10 +2640,10 @@ class MakePeekable(object):
 #   (These are "soft" fails which don't raise exceptions.)
 # * Tries to open (if not already opened) and return the file, letting any exception
 #   raised by open (a "hard" fail) to pass up.
-# * For Unicode builds (when tstr == unicode), returns an io.TextIOBase which produces
-#   unicode strings if and only if mode is text (is not binary / does not contain "b").
+# * For Unicode builds (when mode.tstr == unicode), returns an mode.io.TextIOBase which produces
+#   unicode strings if and only if filemode is text (is not binary / does not contain "b").
 # * The results of opening stdin more than once are undefined.
-def open_or_use(filename, mode = "r",
+def open_or_use(filename, filemode = "r",
         funccall_file    = None,   # already-opened file used if filename == "__funccall"
         permit_stdin     = None,   # when True a filename == "-" opens stdin
         default_filename = None,   # name of file that can be opened if filename == None
@@ -2780,16 +2666,16 @@ def open_or_use(filename, mode = "r",
                 funccall_file.seek(0)
                 # The file has contents; if it shouldn't:
                 if new_or_empty: return None
-        if tstr == unicode:
-            if "b" in mode:
-                assert not isinstance(funccall_file, io.TextIOBase), "already opened file not an io.TextIOBase; produces bytes"
+        if mode.tstr == unicode:
+            if "b" in filemode:
+                assert not isinstance(funccall_file, mode.io.TextIOBase), "already opened file not an mode.io.TextIOBase; produces bytes"
             else:
-                assert isinstance(funccall_file, io.TextIOBase), "already opened file isa io.TextIOBase producing unicode"
+                assert isinstance(funccall_file, mode.io.TextIOBase), "already opened file isa mode.io.TextIOBase producing unicode"
         return MakePeekable(funccall_file) if make_peekable else funccall_file;
     #
     if permit_stdin and filename == "-":
-        if tstr == unicode and "b" not in mode:
-            sys.stdin = io.open(sys.stdin.fileno(), mode,
+        if mode.tstr == unicode and "b" not in filemode:
+            sys.stdin = mode.io.open(sys.stdin.fileno(), filemode,
                                 encoding= sys.stdin.encoding or "utf_8_sig", errors= decoding_errors)
         if make_peekable:
             sys.stdin = MakePeekable(sys.stdin)
@@ -2798,8 +2684,8 @@ def open_or_use(filename, mode = "r",
     # If there was no file specified, but a default exists
     if not filename and default_filename:
         if permit_stdin and default_filename == "-":
-            if tstr == unicode and "b" not in mode:
-                sys.stdin = io.open(sys.stdin.fileno(), mode,
+            if mode.tstr == unicode and "b" not in filemode:
+                sys.stdin = mode.io.open(sys.stdin.fileno(), filemode,
                                     encoding= sys.stdin.encoding or "utf_8_sig", errors= decoding_errors)
             if make_peekable:
                 sys.stdin = MakePeekable(sys.stdin)
@@ -2816,18 +2702,18 @@ def open_or_use(filename, mode = "r",
     if not filename:
         return None
     #
-    filename = tstr_from_stdin(filename)
+    filename = mode.tstr_from_stdin(filename)
     if require_data and (not os.path.isfile(filename) or os.path.getsize(filename) == 0):
         return None
     if new_or_empty and os.path.exists(filename) and (os.path.getsize(filename) > 0 or not os.path.isfile(filename)):
         return None
     #
-    if tstr == unicode and "b" not in mode:
-        file = io.open(filename, mode, encoding="utf_8_sig", errors=decoding_errors)
+    if mode.tstr == unicode and "b" not in filemode:
+        file = mode.io.open(filename, filemode, encoding="utf_8_sig", errors=decoding_errors)
     else:
-        file = open(filename, mode)
+        file = open(filename, filemode)
     #
-    if "b" not in mode:
+    if "b" not in filemode:
         if file.read(5) == br"{\rtf":
             error_exit(filename, "must be a plain text file (.txt), not a Rich Text File (.rtf)")
         file.seek(0)
@@ -2868,10 +2754,10 @@ def init_parser_common():
         typo_types_group = parser_common.add_argument_group("typo types")
         typo_types_group.add_argument("--typos-capslock", action="store_true", help="try the password with caps lock turned on")
         typo_types_group.add_argument("--typos-swap",     action="store_true", help="swap two adjacent characters")
-        for typo_name, typo_args in simple_typo_args.items():
+        for typo_name, typo_args in config.simple_typo_args.items():
             typo_types_group.add_argument("--typos-"+typo_name, **typo_args)
         typo_types_group.add_argument("--typos-insert",   metavar="WILDCARD-STRING", help="insert a string or wildcard")
-        for typo_name in itertools.chain(("swap",), simple_typo_args.keys(), ("insert",)):
+        for typo_name in itertools.chain(("swap",), config.simple_typo_args.keys(), ("insert",)):
             typo_types_group.add_argument("--max-typos-"+typo_name, type=int, default=sys.maxint, metavar="#", help="limit the number of --typos-"+typo_name+" typos")
         typo_types_group.add_argument("--max-adjacent-inserts", type=int, default=1, metavar="#", help="max # of --typos-insert strings that can be inserted between a single pair of characters (default: %(default)s)")
         parser_common.add_argument("--custom-wild", metavar="STRING",    help="a custom set of characters for the %%c wildcard")
@@ -2918,12 +2804,11 @@ def init_parser_common():
         gpu_group.add_argument("--int-rate",   type=int, default=200,   metavar="RATE", help="interrupt rate: raise to improve PC's responsiveness at the expense of search performance (default: %(default)s)")
         parser_common_initialized = True
 
-
 # A decorator that can be used to register a custom simple typo generator function
 # so that it may be passed to parse_arguments() as an option like any other
 def register_simple_typo(name, help = None):
     assert name.isalpha() and name.islower(), "simple typo name must have only lowercase letters"
-    assert name not in simple_typos,          "simple typo must not already exist"
+    assert name not in config.simple_typos,          "simple typo must not already exist"
     init_parser_common()  # ensure typo_types_group has been initialized
     arg_params = dict(action="store_true")
     if help:
@@ -2931,7 +2816,7 @@ def register_simple_typo(name, help = None):
     typo_types_group.add_argument("--typos-"+name, **arg_params)
     typo_types_group.add_argument("--max-typos-"+name, type=int, default=sys.maxint, metavar="#", help="limit the number of --typos-"+name+" typos")
     def decorator(simple_typo_generator):
-        simple_typos[name] = simple_typo_generator
+        config.simple_typos[name] = simple_typo_generator
         return simple_typo_generator  # the decorator returns it unmodified, it just gets registered
     return decorator
 
@@ -3000,8 +2885,8 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
 
     # Set the character mode early-- it's used by a large portion of the
     # rest of this module (starting with the first call to open_or_use())
-    if args.utf8: enable_unicode_mode()
-    else:         enable_ascii_mode()
+    if args.utf8: mode.enable_unicode_mode()
+    else:         mode.enable_ascii_mode()
 
     # If a simple passwordlist or base_iterator is being provided, re-parse the command line with fewer options
     # (--help is handled directly by argparse in this case)
@@ -3027,7 +2912,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         error_exit("--performance cannot be used with --tokenlist or --passwordlist")
 
     if args.list_gpus:
-        devices_avail = get_opencl_devices()  # all available OpenCL device objects
+        devices_avail = config.get_opencl_devices()  # all available OpenCL device objects
         if not devices_avail:
             error_exit("no supported GPUs found")
         for i, dev in enumerate(devices_avail, 1):
@@ -3100,7 +2985,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         assert not args.passwordlist, "parse_arguments: passwordlist option not specified in restored autosave file"
         # If --utf8 was specified in the autosave file, it's not too late
         # to change the character mode (we haven't yet called open_or_use())
-        if args.utf8: enable_unicode_mode()
+        if args.utf8: mode.enable_unicode_mode()
         #
         # We finally know the tokenlist filename; open it here
         tokenlist_file = open_or_use(args.tokenlist, "r", kwds.get("tokenlist"),
@@ -3149,7 +3034,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
 
 
     # Do some basic globals initialization; the rest are all done below
-    init_wildcards()
+    config.init_wildcards()
     init_password_generator()
 
     # Do a bunch of argument sanity checking
@@ -3168,7 +3053,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         args.typos_insert = True
 
     # Sanity check the --max-typos-* options
-    for typo_name in itertools.chain(("swap",), simple_typos.keys(), ("insert",)):
+    for typo_name in itertools.chain(("swap",), config.simple_typos.keys(), ("insert",)):
         typo_max = args.__dict__["max_typos_"+typo_name]
         if typo_max < sys.maxint:
             #
@@ -3191,10 +3076,10 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         args.typos_closecase = None
 
     # Build an ordered list of enabled simple typo generators. This list MUST be in the same relative
-    # order as the items in simple_typos to prevent the breakage of --skip and --restore features
+    # order as the items in config.simple_typos to prevent the breakage of --skip and --restore features
     global enabled_simple_typos
     enabled_simple_typos = tuple(
-        generator for name,generator in simple_typos.items() if args.__dict__["typos_"+name])
+        generator for name,generator in config.simple_typos.items() if args.__dict__["typos_"+name])
 
     # Have _any_ (simple or otherwise) typo types been specified?
     any_typo_types_specified = enabled_simple_typos or \
@@ -3227,7 +3112,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
     global max_simple_typos, sum_max_simple_typos
     if enabled_simple_typos:
         max_simple_typos = \
-            [args.__dict__["max_typos_"+name] for name in simple_typos.keys() if args.__dict__["typos_"+name]]
+            [args.__dict__["max_typos_"+name] for name in config.simple_typos.keys() if args.__dict__["typos_"+name]]
         if min(max_simple_typos) == sys.maxint:    # if none were specified
             max_simple_typos     = None
             sum_max_simple_typos = sys.maxint
@@ -3255,29 +3140,28 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
 
     # Parse the custom wildcard set option
     if args.custom_wild:
-        global wildcard_keys
         if (args.passwordlist or base_iterator) and not \
                 (args.has_wildcards or args.typos_insert or args.typos_replace):
             print(prog+": warning: ignoring unused --custom-wild", file=sys.stderr)
         else:
-            args.custom_wild = tstr_from_stdin(args.custom_wild)
+            args.custom_wild = mode.tstr_from_stdin(args.custom_wild)
             check_chars_range(args.custom_wild, "--custom-wild")
             custom_set_built         = build_wildcard_set(args.custom_wild)
-            wildcard_sets[tstr("c")] = custom_set_built  # (duplicates already removed by build_wildcard_set)
-            wildcard_sets[tstr("C")] = duplicates_removed(custom_set_built.upper())
+            config.wildcard_sets[mode.tstr("c")] = custom_set_built  # (duplicates already removed by build_wildcard_set)
+            config.wildcard_sets[mode.tstr("C")] = duplicates_removed(custom_set_built.upper())
             # If there are any case-sensitive letters in the set, build the case-insensitive versions
             custom_set_caseswapped = custom_set_built.swapcase()
             if custom_set_caseswapped != custom_set_built:
-                wildcard_nocase_sets[tstr("c")] = duplicates_removed(custom_set_built + custom_set_caseswapped)
-                wildcard_nocase_sets[tstr("C")] = wildcard_nocase_sets[tstr("c")].swapcase()
-            wildcard_keys += tstr("cC")  # keep track of available wildcard types (this is used in regex's)
+                config.wildcard_nocase_sets[mode.tstr("c")] = duplicates_removed(custom_set_built + custom_set_caseswapped)
+                config.wildcard_nocase_sets[mode.tstr("C")] = config.wildcard_nocase_sets[mode.tstr("c")].swapcase()
+            config.wildcard_keys += mode.tstr("cC")  # keep track of available wildcard types (this is used in regex's)
 
     # Syntax check and expand --typos-insert/--typos-replace wildcards
     # N.B. changing the iteration order below will break autosave/restore between btcr versions
-    global typos_insert_expanded, typos_replace_expanded
+    global typos_insert_expanded
     for arg_name, arg_val in ("--typos-insert", args.typos_insert), ("--typos-replace", args.typos_replace):
         if arg_val:
-            arg_val = tstr_from_stdin(arg_val)
+            arg_val = mode.tstr_from_stdin(arg_val)
             check_chars_range(arg_val, arg_name)
             count_or_error_msg = count_valid_wildcards(arg_val)
             if isinstance(count_or_error_msg, basestring):
@@ -3287,21 +3171,21 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
     if args.typos_insert:
         typos_insert_expanded  = tuple(expand_wildcards_generator(args.typos_insert))
     if args.typos_replace:
-        typos_replace_expanded = tuple(expand_wildcards_generator(args.typos_replace))
+        config.typos_replace_expanded = tuple(expand_wildcards_generator(args.typos_replace))
 
     if inserted_items:
         args.typos_insert     = True  # undo the temporary change from above
         typos_insert_expanded = tuple(inserted_items)
 
     if args.delimiter:
-        args.delimiter = tstr_from_stdin(args.delimiter)
+        args.delimiter = mode.tstr_from_stdin(args.delimiter)
 
     # Process any --typos-map file: build a dict (typos_map) mapping replaceable characters to their replacements
-    global typos_map
-    typos_map = None
+    #global typos_map
+    config.typos_map = None
     if args.typos_map:
         sha1 = hashlib.sha1() if savestate else None
-        typos_map = parse_mapfile(open_or_use(args.typos_map, "r", kwds.get("typos_map")), sha1, b"--typos-map")
+        config.typos_map = parse_mapfile(open_or_use(args.typos_map, "r", kwds.get("typos_map")), sha1, b"--typos-map")
         #
         # If autosaving, take the hash of the typos_map and either check it
         # during a session restore to make sure we're actually restoring
@@ -3322,9 +3206,9 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
 
     # Compile the regex options
     global regex_only, regex_never
-    try:   regex_only  = re.compile(tstr_from_stdin(args.regex_only),  re.U) if args.regex_only  else None
+    try:   regex_only  = re.compile(mode.tstr_from_stdin(args.regex_only),  re.U) if args.regex_only  else None
     except re.error as e: error_exit("invalid --regex-only",  args.regex_only, ":", e)
-    try:   regex_never = re.compile(tstr_from_stdin(args.regex_never), re.U) if args.regex_never else None
+    try:   regex_never = re.compile(mode.tstr_from_stdin(args.regex_never), re.U) if args.regex_never else None
     except re.error as e: error_exit("invalid --regex-never", args.regex_only, ":", e)
 
     global custom_final_checker
@@ -3397,7 +3281,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         elif args.wallet == "__null":
             loaded_wallet = WalletNull()
         else:
-            load_global_wallet(args.wallet)
+            config.load_global_wallet(args.wallet)
             if type(loaded_wallet) is WalletBitcoinj:
                 print(prog+": notice: for MultiBit, use a .key file instead of a .wallet file if possible")
             if isinstance(loaded_wallet, WalletMultiBit) and not args.android_pin:
@@ -3424,7 +3308,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
             except AttributeError: pass
             key_crc_base64 = raw_input(key_prompt)
         #
-        # Emulates load_global_wallet(), but using the base64 key data instead of a wallet
+        # Emulates config.load_global_wallet(), but using the base64 key data instead of a wallet
         # file (this sets the loaded_wallet global, and returns the validated CRC)
         key_crc = load_from_base64_key(key_crc_base64)
         #
@@ -3473,7 +3357,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
             error_exit(loaded_wallet.__class__.__name__ + " does not support GPU acceleration")
         if isinstance(loaded_wallet, WalletBitcoinCore) and args.calc_memory:
             error_exit("--calc-memory is not supported for Bitcoin Core wallets")
-        devices_avail = get_opencl_devices()  # all available OpenCL device objects
+        devices_avail = config.get_opencl_devices()  # all available OpenCL device objects
         if not devices_avail:
             error_exit("no supported GPUs found")
         if args.int_rate <= 0:
@@ -3617,7 +3501,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
             for line_num in xrange(1, 1000000):
                 line = passwordlist_file.readline()
                 eof  = not line
-                line = line.rstrip(tstr("\r\n"))
+                line = line.rstrip(mode.tstr("\r\n"))
                 if eof or passwordlist_isatty and line == "exit()":
                     passwordlist_allcached = True
                     break
@@ -3694,7 +3578,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         sha1          = hashlib.sha1() if savestate else None
         try:
             for excluded_pw in exclude_file:
-                excluded_pw = excluded_pw.rstrip(tstr("\r\n"))
+                excluded_pw = excluded_pw.rstrip(mode.tstr("\r\n"))
                 check_chars_range(excluded_pw, "--exclude-passwordlist file")
                 password_dups.exclude(excluded_pw)  # now is_duplicate(excluded_pw) will always return True
                 if sha1:
@@ -3759,15 +3643,15 @@ def parse_mapfile(map_file, running_hash = None, feature_name = b"map", same_per
             #
             # Remove the trailing newline, then split the line exactly
             # once on the specified delimiter (default: whitespace)
-            split_line = line.rstrip(tstr("\r\n")).split(args.delimiter, 1)
-            if split_line in ([], [tstr('')]): continue  # ignore empty lines
+            split_line = line.rstrip(mode.tstr("\r\n")).split(args.delimiter, 1)
+            if split_line in ([], [mode.tstr('')]): continue  # ignore empty lines
             if len(split_line) == 1:
                 error_exit(feature_name, b"file '"+map_file.name+b"' has an empty replacement list on line", line_num)
             if args.delimiter is None: split_line[1] = split_line[1].rstrip()  # ignore trailing whitespace by default
 
-            check_chars_range(tstr().join(split_line), feature_name + b" file" + (b" '" + map_file.name + b"'" if hasattr(map_file, "name") else b""))
+            check_chars_range(mode.tstr().join(split_line), feature_name + b" file" + (b" '" + map_file.name + b"'" if hasattr(map_file, "name") else b""))
             for c in split_line[0]:  # (c is the character to be replaced)
-                replacements = duplicates_removed(map_data.get(c, tstr()) + split_line[1])
+                replacements = duplicates_removed(map_data.get(c, mode.tstr()) + split_line[1])
                 if not same_permitted and c in replacements:
                     map_data[c] = filter(lambda r: r != c, replacements)
                 else:
@@ -3852,20 +3736,20 @@ class AnchoredToken(object):
                 if match.group(b"middle"):
                     begin = match.group(b"begin")
                     end   = match.group(b"end")
-                    cached_str = tstr("^")  # begin building the cached __str__
+                    cached_str = mode.tstr("^")  # begin building the cached __str__
                     if begin is None:
                         begin = 2
                     else:
                         begin = int(begin)
                         if begin > 2:
-                            cached_str += tstr(begin)
-                    cached_str += tstr(",")
+                            cached_str += mode.tstr(begin)
+                    cached_str += mode.tstr(",")
                     if end is None:
                         end = sys.maxint
                     else:
                         end = int(end)
-                        cached_str += tstr(end)
-                    cached_str += tstr("^")
+                        cached_str += mode.tstr(end)
+                    cached_str += mode.tstr("^")
                     if begin > end:
                         error_exit("anchor range of token on line", line_num, "is invalid (begin > end)")
                     if begin < 2:
@@ -3877,16 +3761,16 @@ class AnchoredToken(object):
                 # If it's a positional or relative anchor
                 elif match.group(b"pos"):
                     pos = int(match.group(b"pos"))
-                    cached_str = tstr("^")  # begin building the cached __str__
+                    cached_str = mode.tstr("^")  # begin building the cached __str__
                     if match.group(b"rel"):
-                        cached_str += tstr("r") + tstr(pos) + tstr("^")
+                        cached_str += mode.tstr("r") + mode.tstr(pos) + mode.tstr("^")
                         self.type = AnchoredToken.RELATIVE
                         self.pos  = pos
                     else:
                         if pos < 1:
                             error_exit("anchor position of token on line", line_num, "must be 1 or greater")
                         if pos > 1:
-                            cached_str += tstr(pos) + tstr("^")
+                            cached_str += mode.tstr(pos) + mode.tstr("^")
                         self.type = AnchoredToken.POSITIONAL
                         self.pos  = pos - 1
                 #
@@ -3903,7 +3787,7 @@ class AnchoredToken(object):
                 if len(token) > 2 and token[1].lower() == b"r" and token[2] in b"0123456789":
                     print(prog+": warning: token on line", line_num, "looks like it might be a relative anchor, " +
                           "but it can't be parsed correctly, so it's assumed to be a simple beginning anchor instead", file=sys.stderr)
-                cached_str = tstr("^")  # begin building the cached __str__
+                cached_str = mode.tstr("^")  # begin building the cached __str__
                 self.type  = AnchoredToken.POSITIONAL
                 self.pos   = 0
                 self.text  = token[1:]
@@ -3931,7 +3815,7 @@ class AnchoredToken(object):
     def __hash__(self):      return self.cached_hash
     def __eq__(self, other): return     isinstance(other, AnchoredToken) and self.cached_str == other.cached_str
     def __ne__(self, other): return not isinstance(other, AnchoredToken) or  self.cached_str != other.cached_str
-    # For sort (so that tstr() can be used as the key function)
+    # For sort (so that mode.tstr() can be used as the key function)
     def __str__(self):       return     str(self.cached_str)
     def __unicode__(self):   return unicode(self.cached_str)
     # For hashlib
@@ -3962,10 +3846,10 @@ def parse_tokenlist(tokenlist_file, first_line_num = 1):
 
         # Remove the trailing newline, then split the line on the
         # specified delimiter (default: whitespace) to get a list of tokens
-        new_list.extend( line.rstrip(tstr("\r\n")).split(args.delimiter) )
+        new_list.extend( line.rstrip(mode.tstr("\r\n")).split(args.delimiter) )
 
         # Ignore empty lines
-        if new_list in ([None], [None, tstr('')]): continue
+        if new_list in ([None], [None, mode.tstr('')]): continue
 
         # If a "+" is present at the beginning followed by at least one token,
         # then exactly one of the token(s) is required. This is noted in the structure
@@ -4023,9 +3907,8 @@ def parse_tokenlist(tokenlist_file, first_line_num = 1):
     # either check them during a session restore to make sure we're actually
     # restoring the exact same session, or save them for future such checks
     if savestate:
-        global backreference_maps_sha1
         token_lists_hash        = hashlib.sha1(repr(token_lists)).digest()
-        backreference_maps_hash = backreference_maps_sha1.digest() if backreference_maps_sha1 else None
+        backreference_maps_hash = config.backreference_maps_sha1.digest() if config.backreference_maps_sha1 else None
         if restored:
             if token_lists_hash != savestate[b"token_lists_hash"]:
                 error_exit("can't restore previous session: the tokenlist file has changed")
@@ -4039,16 +3922,16 @@ def parse_tokenlist(tokenlist_file, first_line_num = 1):
 
 # Load any map files referenced in wildcard backreferences in the passed token
 def load_backreference_maps_from_token(token):
-    global backreference_maps       # initialized to dict() in init_wildcards()
-    global backreference_maps_sha1  # initialized to  None  in init_wildcards()
+    #global config.backreference_maps       # initialized to dict() in config.init_wildcards()
+    #global config.backreference_maps_sha1  # initialized to  None  in config.init_wildcards()
     # We know all wildcards present have valid syntax, so we don't need to use the full regex, but
     # we do need to capture %% to avoid parsing this as a backreference (it isn't one): %%;file;b
     for map_filename in re.findall(br"%[\d,]*;(.+?);\d*b|%%", token):
-        if map_filename and map_filename not in backreference_maps:
-            if savestate and not backreference_maps_sha1:
-                backreference_maps_sha1 = hashlib.sha1()
-            backreference_maps[map_filename] = \
-                parse_mapfile(open(map_filename, "r"), backreference_maps_sha1, b"backreference map", same_permitted=True)
+        if map_filename and map_filename not in config.backreference_maps:
+            if savestate and not config.backreference_maps_sha1:
+                config.backreference_maps_sha1 = hashlib.sha1()
+            config.backreference_maps[map_filename] = \
+                parse_mapfile(open(map_filename, "r"), config.backreference_maps_sha1, b"backreference map", same_permitted=True)
 
 
 ################################### Password Generation ###################################
@@ -4291,7 +4174,7 @@ def tokenlist_base_password_generator():
     l_tuple                  = tuple
     l_sorted                 = sorted
     l_list                   = list
-    l_tstr                   = tstr
+    l_tstr                   = mode.tstr
 
     # Choose between the custom duplicate-checking and the standard itertools permutation
     # functions for the outer loop unless the custom one has been specifically disabled
@@ -4607,7 +4490,7 @@ def passwordlist_base_password_generator():
     if not passwordlist_allcached:
         assert not passwordlist_file.closed
         for line_num, password_base in enumerate(passwordlist_file, line_num):  # not yet syntax-checked
-            password_base = password_base.rstrip(tstr("\r\n"))
+            password_base = password_base.rstrip(mode.tstr("\r\n"))
             try:
                 check_chars_range(password_base, "line", no_replacement_chars=True)
             except SystemExit as e:
@@ -4645,7 +4528,7 @@ def passwordlist_base_password_generator():
 # are then used by password_generator() as base passwords that can undergo further modifications.
 def default_performance_base_password_generator():
     for i in itertools.count(0):
-        yield tstr("Measure Performance ") + tstr(i)
+        yield mode.tstr("Measure Performance ") + mode.tstr(i)
 
 
 # This generator function expands (or contracts) all wildcards in the string passed
@@ -4655,10 +4538,10 @@ def default_performance_base_password_generator():
 #   prior_prefix + password_with_all_wildcards_expanded
 # TODO: implement without recursion?
 def expand_wildcards_generator(password_with_wildcards, prior_prefix = None):
-    if prior_prefix is None: prior_prefix = tstr()
+    if prior_prefix is None: prior_prefix = mode.tstr()
 
     # Quick check to see if any wildcards are present
-    if tstr("%") not in password_with_wildcards:
+    if mode.tstr("%") not in password_with_wildcards:
         # If none, just produce the string and end
         yield prior_prefix + password_with_wildcards
         return
@@ -4670,15 +4553,14 @@ def expand_wildcards_generator(password_with_wildcards, prior_prefix = None):
     l_max    = max
 
     # Find the first wildcard parameter in the format %[[min,]max][caseflag]type where
-    # caseflag == "i" if present and type is one of: wildcard_keys, "<", ">", or "-"
+    # caseflag == "i" if present and type is one of: config.wildcard_keys, "<", ">", or "-"
     # (e.g. "%d", "%-", "%2n", "%1,3ia", etc.), or type is of the form "[custom-wildcard-set]", or
     # for backreferences type is of the form: [ ";file;" ["#"] | ";#" ] "b"  <--brackets denote options
-    global wildcard_re
-    if not wildcard_re:
-        wildcard_re = re.compile(
+    if not config.wildcard_re:
+        config.wildcard_re = re.compile(
             br"%(?:(?:(?P<min>\d+),)?(?P<max>\d+))?(?P<nocase>i)?(?:(?P<type>[{}<>-])|\[(?P<custom>.+?)\]|(?:;(?:(?P<bfile>.+?);)?(?P<bpos>\d+)?)?(?P<bref>b))" \
-            .format(wildcard_keys))
-    match = wildcard_re.search(password_with_wildcards)
+            .format(config.wildcard_keys))
+    match = config.wildcard_re.search(password_with_wildcards)
     assert match, "expand_wildcards_generator: parsed valid wildcard spec"
 
     password_prefix      = password_with_wildcards[0:match.start()]          # no wildcards present here,
@@ -4689,13 +4571,13 @@ def expand_wildcards_generator(password_with_wildcards, prior_prefix = None):
     if m_bref:  # a backreference wildcard, e.g. "%b" or "%;2b" or "%;map.txt;2b"
         m_bfile, m_bpos = match.group(b"bfile", b"bpos")
         m_bpos = int(m_bpos) if m_bpos else 1
-        bmap = backreference_maps[m_bfile] if m_bfile else None
+        bmap = config.backreference_maps[m_bfile] if m_bfile else None
     else:
         # For positive (expanding) wildcards, build the set of possible characters based on the wildcard type and caseflag
         m_custom, m_nocase = match.group(b"custom", b"nocase")
         if m_custom:  # a custom set wildcard, e.g. %[abcdef0-9]
             is_expanding = True
-            wildcard_set = custom_wildcard_cache.get((m_custom, m_nocase))
+            wildcard_set = config.custom_wildcard_cache.get((m_custom, m_nocase))
             if wildcard_set is None:
                 wildcard_set = build_wildcard_set(m_custom)
                 if m_nocase:
@@ -4703,15 +4585,15 @@ def expand_wildcards_generator(password_with_wildcards, prior_prefix = None):
                     wildcard_set_caseswapped = wildcard_set.swapcase()
                     if wildcard_set_caseswapped != wildcard_set:
                         wildcard_set = duplicates_removed(wildcard_set + wildcard_set_caseswapped)
-                custom_wildcard_cache[(m_custom, m_nocase)] = wildcard_set
+                config.custom_wildcard_cache[(m_custom, m_nocase)] = wildcard_set
         else:  # either a "normal" or a contracting wildcard
             m_type = match.group(b"type")
             is_expanding = m_type not in b"<>-"
             if is_expanding:
-                if m_nocase and m_type in wildcard_nocase_sets:
-                    wildcard_set = wildcard_nocase_sets[m_type]
+                if m_nocase and m_type in config.wildcard_nocase_sets:
+                    wildcard_set = config.wildcard_nocase_sets[m_type]
                 else:
-                    wildcard_set = wildcard_sets[m_type]
+                    wildcard_set = config.wildcard_sets[m_type]
         assert not is_expanding or wildcard_set, "expand_wildcards_generator: found expanding wildcard set"
 
     # Extract or default the wildcard min and max length
@@ -4785,10 +4667,10 @@ def expand_wildcards_generator(password_with_wildcards, prior_prefix = None):
 
                 # If the wildcard was at the end of the string, we're done
                 if password_postfix_with_wildcards == "":
-                    yield full_password_prefix + tstr().join(wildcard_expanded_list)
+                    yield full_password_prefix + mode.tstr().join(wildcard_expanded_list)
                     continue
                 # Recurse to expand any additional wildcards possibly in password_postfix_with_wildcards
-                for password_expanded in expand_wildcards_generator(password_postfix_with_wildcards, full_password_prefix + tstr().join(wildcard_expanded_list)):
+                for password_expanded in expand_wildcards_generator(password_postfix_with_wildcards, full_password_prefix + mode.tstr().join(wildcard_expanded_list)):
                     yield password_expanded
 
     # Otherwise it's a contracting wildcard
@@ -4903,26 +4785,6 @@ def swap_typos_generator(password_base, min_typos = 0):
                     yield password
 
         typos_sofar -= swap_count
-
-
-# Convenience functions currently only used by typo_closecase()
-#
-UNCASED_ID   = 0
-LOWERCASE_ID = 1
-UPPERCASE_ID = 2
-def case_id_of(letter):
-    if   letter.islower(): return LOWERCASE_ID
-    elif letter.isupper(): return UPPERCASE_ID
-    else:                  return UNCASED_ID
-#
-# Note that  in order for a case to be considered changed, one of the two letters must be
-# uppercase (i.e. lowercase to uncased isn't a case change, but uppercase to uncased is a
-# case change, and of course lowercase to uppercase is too)
-def case_id_changed(case_id1, case_id2):
-    if case_id1 != case_id2 and (case_id1 == UPPERCASE_ID or case_id2 == UPPERCASE_ID):
-          return True
-    else: return False
-
 
 # simple_typos_generator() is a generator function which, given a password_base, produces
 # all possible combinations of typos of that password_base, of a count and of types specified
@@ -5121,9 +4983,9 @@ def init_worker(wallet, char_mode):
     if not loaded_wallet:
         loaded_wallet = wallet
         if char_mode == str:
-            enable_ascii_mode()
+            mode.enable_ascii_mode()
         elif char_mode == unicode:
-            enable_unicode_mode()
+            mode.enable_unicode_mode()
         else:
             assert False
     set_process_priority_idle()
@@ -5353,7 +5215,7 @@ def main():
     # If --listpass was requested, just list out all the passwords and exit
     passwords_count = 0
     if args.listpass:
-        if tstr == unicode:
+        if mode.tstr == unicode:
             stdout_encoding = sys.stdout.encoding if hasattr(sys.stdout, "encoding") else None  # for unittest
             if not stdout_encoding:
                 print(prog+": warning: output will be UTF-8 encoded", file=sys.stderr)
@@ -5539,7 +5401,7 @@ def main():
         password_found_iterator = itertools.imap(return_verified_password_or_false, password_iterator)
         set_process_priority_idle()  # this, the only thread, should be nice
     else:
-        pool = multiprocessing.Pool(spawned_threads, init_worker, (loaded_wallet, tstr))
+        pool = multiprocessing.Pool(spawned_threads, init_worker, (loaded_wallet, mode.tstr))
         password_found_iterator = pool.imap(return_verified_password_or_false, password_iterator)
         if main_thread_is_worker: set_process_priority_idle()  # if this thread is cpu-intensive, be nice
 
