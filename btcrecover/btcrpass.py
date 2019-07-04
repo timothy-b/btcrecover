@@ -575,7 +575,7 @@ class WalletArmory(object):
         salt = self._kdf.getSalt().toBinStr()
         hashes = numpy.empty([sum(self._cl_global_ws), 64], numpy.uint8)
         for i, password in enumerate(passwords):
-            hashes[i] = numpy.fromstring(hashlib.sha512(password + salt).digest(), numpy.uint8)
+            hashes[i] = numpy.frombuffer(hashlib.sha512(password + salt).digest(), numpy.uint8)
 
         # Divide up and copy the starting hashes into the OpenCL buffer(s) (one per device) in parallel
         done   = []  # a list of OpenCL event objects
@@ -872,7 +872,7 @@ class WalletBitcoinCore(object):
         # The first iter_count iteration is done by the CPU
         hashes = numpy.empty([sum(self._cl_global_ws), 64], numpy.uint8)
         for i, password in enumerate(passwords):
-            hashes[i] = numpy.fromstring(hashlib.sha512(password + self._salt).digest(), numpy.uint8)
+            hashes[i] = numpy.frombuffer(hashlib.sha512(password + self._salt).digest(), numpy.uint8)
 
         # Divide up and copy the starting hashes into the OpenCL buffer(s) (one per device) in parallel
         done   = []  # a list of OpenCL event objects
