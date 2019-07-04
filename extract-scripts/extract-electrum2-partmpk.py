@@ -65,7 +65,7 @@ if wallet_type == "old":
     desc      = "First half of encrypted Electrum 1.x seed"
 
 else:
-    if wallet.get("seed_version") not in (11, 12, 13) and wallet_type != "imported":  # all 2.x versions as of Oct 2016
+    if wallet.get("seed_version") not in (11, 12, 13, 16) and wallet_type != "imported":  # all 2.x versions as of Oct 2016
                                      raise NotImplementedError("Unsupported Electrum2 seed version " + str(seed_version))
     xprv = None
 
