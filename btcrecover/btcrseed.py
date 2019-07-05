@@ -28,6 +28,8 @@
 # (all optional futures for 2.7 except unicode_literals)
 from __future__ import print_function, absolute_import, division
 
+from btcrecover import CryptoUtil, Wallet
+
 __version__ = "0.7.3"
 
 from . import btcrpass
@@ -265,7 +267,7 @@ class WalletElectrum1(WalletBase):
     def load_from_filename(cls, wallet_filename):
         from ast import literal_eval
         with open(wallet_filename) as wallet_file:
-            wallet = literal_eval(wallet_file.read(btcrpass.MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
+            wallet = literal_eval(wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
         return cls._load_from_dict(wallet)
 
     @classmethod
@@ -804,12 +806,12 @@ class WalletBIP39(WalletBIP32):
         super(WalletBIP39, self).__init__(path, loading)
         if not self._language_words:
             self._load_wordlists()
-        pbkdf2_library_name = btcrpass.load_pbkdf2_library().__name__  # btcrpass's pbkdf2 library is used in _derive_seed()
+        pbkdf2_library_name = CryptoUtil.load_pbkdf2_library().__name__  # btcrpass's pbkdf2 library is used in _derive_seed()
         self._kdf_overhead = 0.0026 if pbkdf2_library_name == "hashlib" else 0.013
 
     def __setstate__(self, state):
         # (Re)load the pbkdf2 library if necessary
-        btcrpass.load_pbkdf2_library()
+        CryptoUtil.load_pbkdf2_library()
         self.__dict__ = state
 
     # Converts a mnemonic word from a Python unicode (as produced by load_wordlist())
@@ -1014,7 +1016,7 @@ class WalletBIP39(WalletBIP32):
     # Called by WalletBIP32.return_verified_password_or_false() to create a binary seed
     def _derive_seed(self, mnemonic_words):
         # Note: the words are already in BIP39's normalized form
-        return btcrpass.pbkdf2_hmac("sha512", b" ".join(mnemonic_words), self._derivation_salt, 2048)
+        return CryptoUtil.pbkdf2_hmac("sha512", b" ".join(mnemonic_words), self._derivation_salt, 2048)
 
     # Produces a long stream of differing and incorrect mnemonic_ids guesses (for testing)
     # (uses mnemonic_ids_guess, num_inserts, and num_deletes globals as set by config_mnemonic())
@@ -1057,7 +1059,7 @@ class WalletBitcoinj(WalletBIP39):
         from . import wallet_pb2
         pb_wallet = wallet_pb2.Wallet()
         with open(wallet_filename, "rb") as wallet_file:
-            pb_wallet.ParseFromString(wallet_file.read(btcrpass.MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
+            pb_wallet.ParseFromString(wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
         if pb_wallet.encryption_type == wallet_pb2.Wallet.UNENCRYPTED:
             raise ValueError("this bitcoinj wallet is not encrypted")
 
@@ -1288,7 +1290,7 @@ class WalletElectrum2(WalletBIP39):
     # Called by WalletBIP32.return_verified_password_or_false() to create a binary seed
     def _derive_seed(self, mnemonic_words):
         # Note: the words are already in Electrum2's normalized form
-        return btcrpass.pbkdf2_hmac("sha512", self._space.join(mnemonic_words), self._derivation_salt, 2048)
+        return CryptoUtil.pbkdf2_hmac("sha512", self._space.join(mnemonic_words), self._derivation_salt, 2048)
 
     # Returns a dummy xpub for performance testing purposes
     @staticmethod
@@ -1392,7 +1394,7 @@ def delete_word(mnemonic_ids, i):
 @btcrpass.register_simple_typo("replaceword")
 def replace_word(mnemonic_ids, i):
     if mnemonic_ids[i] is None: return (),      # don't touch invalid words
-    return ((new_id,) for new_id in loaded_wallet.word_ids if new_id != mnemonic_ids[i])
+    return ((new_id,) for new_id in Wallet.get_loaded_wallet().word_ids if new_id != mnemonic_ids[i])
 #
 @btcrpass.register_simple_typo("replacecloseword")
 def replace_close_word(mnemonic_ids, i):
@@ -1402,7 +1404,7 @@ def replace_close_word(mnemonic_ids, i):
 @btcrpass.register_simple_typo("replacewrongword")
 def replace_wrong_word(mnemonic_ids, i):
     if mnemonic_ids[i] is not None: return (),  # only replace invalid words
-    return ((new_id,) for new_id in loaded_wallet.word_ids)
+    return ((new_id,) for new_id in Wallet.get_loaded_wallet().word_ids)
 
 
 # Builds a command line and then runs btcrecover with it.
@@ -1458,7 +1460,7 @@ def run_btcrecover(typos, big_typos = 0, min_typos = 0, is_performance = False, 
 
     # For (only) Electrum2, num_inserts are not required, so we try several sub-phases with a
     # different number of inserts each time; for all others the total num_inserts are required
-    if isinstance(loaded_wallet, WalletElectrum2):
+    if isinstance(Wallet.get_loaded_wallet(), WalletElectrum2):
         num_inserts_to_try = xrange(l_num_inserts + 1)  # try a range
     else:
         num_inserts_to_try = l_num_inserts,             # only try the required max
@@ -1474,7 +1476,7 @@ def run_btcrecover(typos, big_typos = 0, min_typos = 0, is_performance = False, 
             l_any_typos -= cur_num_inserts
             l_big_typos -= cur_num_inserts
             # (instead of --typos-insert we'll set inserted_items=ids_to_try_inserting below)
-            ids_to_try_inserting = ((id,) for id in loaded_wallet.word_ids)
+            ids_to_try_inserting = ((id,) for id in Wallet.get_loaded_wallet().word_ids)
             l_btcr_args += " --max-adjacent-inserts " + str(cur_num_inserts)
             if cur_num_inserts < typos:
                 l_btcr_args += " --max-typos-insert " + str(cur_num_inserts)
@@ -1532,10 +1534,10 @@ def run_btcrecover(typos, big_typos = 0, min_typos = 0, is_performance = False, 
         btcrpass.parse_arguments(
             l_btcr_args.split() + extra_args,
             inserted_items= ids_to_try_inserting,
-            wallet=         loaded_wallet,
+            wallet=         Wallet.get_loaded_wallet(),
             base_iterator=  (mnemonic_ids_guess,) if not is_performance else None, # the one guess to modify
-            perf_iterator=  lambda: loaded_wallet.performance_iterator(),
-            check_only=     loaded_wallet.verify_mnemonic_syntax
+            perf_iterator=  lambda: Wallet.get_loaded_wallet().performance_iterator(),
+            check_only=     Wallet.get_loaded_wallet().verify_mnemonic_syntax
         )
         (mnemonic_found, not_found_msg) = btcrpass.main()
 
@@ -1552,15 +1554,14 @@ def register_autodetecting_wallets():
 
     :rtype: None
     """
-    btcrpass.clear_registered_wallets()
+    Wallet.clear_registered_wallets()
     for wallet_cls, description in selectable_wallet_classes:
         if hasattr(wallet_cls, "is_wallet_file"):
-            btcrpass.register_wallet_class(wallet_cls)
+            Wallet.register_wallet_class(wallet_cls)
 
 
 def main(argv):
-    global loaded_wallet
-    loaded_wallet = wallet_type = None
+    wallet_type = None
     create_from_params     = {}  # additional args to pass to wallet_type.create_from_params()
     config_mnemonic_params = {}  # additional args to pass to wallet.config_mnemonic()
     phase                  = {}  # if only one phase is requested, the args to pass to run_btcrecover()
@@ -1615,7 +1616,7 @@ def main(argv):
         if args.version: sys.exit(0)
 
         if args.wallet:
-            loaded_wallet = btcrpass.load_wallet(args.wallet)
+            Wallet.load_wallet(args.wallet)
 
         # Look up the --wallet-type arg in the list of selectable_wallet_classes
         if args.wallet_type:
@@ -1740,15 +1741,15 @@ def main(argv):
                                 not multiprocessing.current_process().name.startswith("PoolWorker-") and
                                 raw_input("Press Enter to exit ..."))
 
-    if not loaded_wallet and not wallet_type:  # neither --wallet nor --wallet-type were specified
+    if not Wallet.get_loaded_wallet() and not wallet_type:  # neither --wallet nor --wallet-type were specified
 
         # Ask for a wallet file
         init_gui()
         wallet_filename = tkFileDialog.askopenfilename(title="Please select your wallet file if you have one")
         if wallet_filename:
-            loaded_wallet = btcrpass.load_wallet(wallet_filename)  # raises on failure; no second chance
+            Wallet.load_wallet(wallet_filename)  # raises on failure; no second chance
 
-    if not loaded_wallet:    # if no wallet file was chosen
+    if not Wallet.get_loaded_wallet():    # if no wallet file was chosen
 
         if not wallet_type:  # if --wallet-type wasn't specified
 
@@ -1778,7 +1779,7 @@ def main(argv):
                 sys.exit("canceled")
 
         try:
-            loaded_wallet = wallet_type.create_from_params(**create_from_params)
+            Wallet.set_loaded_wallet(wallet_type.create_from_params(**create_from_params))
         except TypeError as e:
             matched = re.match("create_from_params\(\) got an unexpected keyword argument '(.*)'", str(e))
             if matched:
@@ -1788,11 +1789,11 @@ def main(argv):
             sys.exit(e)
 
     try:
-        loaded_wallet.config_mnemonic(**config_mnemonic_params)
+        Wallet.get_loaded_wallet().config_mnemonic(**config_mnemonic_params)
     except TypeError as e:
         matched = re.match("config_mnemonic\(\) got an unexpected keyword argument '(.*)'", str(e))
         if matched:
-            sys.exit("{} does not support the {} option".format(loaded_wallet.__class__.__name__, matched.group(1)))
+            sys.exit("{} does not support the {} option".format(Wallet.get_loaded_wallet().__class__.__name__, matched.group(1)))
         raise
     except ValueError as e:
         sys.exit(e)
@@ -1800,10 +1801,10 @@ def main(argv):
     # Seeds for some wallet types have a checksum which is unlikely to be correct
     # for the initial provided seed guess; if it is correct, let the user know
     try:
-        if (  loaded_wallet._initial_words_valid
-          and loaded_wallet.verify_mnemonic_syntax(mnemonic_ids_guess)
-          and loaded_wallet._verify_checksum(mnemonic_ids_guess) ):
-            print(u"Initial seed guess has a valid checksum ({:.2g}% chance).".format(loaded_wallet._checksum_ratio * 100.0))
+        if (Wallet.get_loaded_wallet()._initial_words_valid
+          and Wallet.get_loaded_wallet().verify_mnemonic_syntax(mnemonic_ids_guess)
+          and Wallet.get_loaded_wallet()._verify_checksum(mnemonic_ids_guess)):
+            print(u"Initial seed guess has a valid checksum ({:.2g}% chance).".format(Wallet.get_loaded_wallet()._checksum_ratio * 100.0))
     except AttributeError: pass
 
     # Now that most of the GUI code is done, undo any Windows shell extension workarounds from init_gui()
@@ -1821,7 +1822,7 @@ def main(argv):
     # Set reasonable defaults for the search phases
     else:
         # If each guess is very slow, separate out the first two phases
-        passwords_per_seconds = loaded_wallet.passwords_per_seconds(1)
+        passwords_per_seconds = Wallet.get_loaded_wallet().passwords_per_seconds(1)
         if passwords_per_seconds < 25:
             phases = [ dict(typos=1), dict(typos=2, min_typos=2) ]
         else:
@@ -1856,7 +1857,7 @@ def main(argv):
         mnemonic_found = run_btcrecover(**phase_params)
 
         if mnemonic_found:
-            return " ".join(loaded_wallet.id_to_word(i) for i in mnemonic_found).decode("utf_8")
+            return " ".join(Wallet.get_loaded_wallet().id_to_word(i) for i in mnemonic_found).decode("utf_8")
         elif mnemonic_found is None:
             return None  # An error occurred or Ctrl-C was pressed inside btcrpass.main()
         else:

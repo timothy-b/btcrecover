@@ -51,7 +51,9 @@ import timeit
 
 import btcrecover.modules.configurables as config
 import btcrecover.modules.mode as mode
+from btcrecover.modules.utilities.crypto_util import CryptoUtil
 from btcrecover.modules.wallets.armory import WalletArmory
+from btcrecover.modules.wallets.bitcoin_core import WalletBitcoinCore
 from btcrecover.modules.wallets.wallet import Wallet
 
 __version__          =  "0.17.10"
@@ -74,12 +76,8 @@ def full_version():
     )
 
 
-
-
 enable_ascii_mode = mode.enable_ascii_mode
 enable_unicode_mode = mode.enable_unicode_mode
-
-
 
 
 # Load the OpenCL libraries and return a list of available devices
@@ -126,268 +124,6 @@ def prompt_unicode_password(prompt, error_msg):
     if isinstance(password, str):
         password = password.decode(encoding)  # convert from terminal's encoding to unicode
     return password
-
-############### Bitcoin Core ###############
-
-
-@Wallet.register_wallet_class
-class WalletBitcoinCore(object):
-
-    class __metaclass__(type):
-        @property
-        def data_extract_id(cls): return b"bc"
-
-    @staticmethod
-    def passwords_per_seconds(seconds):
-        return max(int(round(10 * seconds)), 1)
-
-    @staticmethod
-    def is_wallet_file(wallet_file):
-        wallet_file.seek(12)
-        return wallet_file.read(8) == b"\x62\x31\x05\x00\x09\x00\x00\x00"  # BDB magic, Btree v9
-
-    def __init__(self, loading = False):
-        assert loading, 'use load_from_* to create a ' + self.__class__.__name__
-        load_aes256_library()
-
-    def __setstate__(self, state):
-        # (re-)load the required libraries after being unpickled
-        load_aes256_library(warnings=False)
-        self.__dict__ = state
-
-    # Load a Bitcoin Core BDB wallet file given the filename and extract part of the first encrypted master key
-    @classmethod
-    def load_from_filename(cls, wallet_filename, force_purepython = False):
-        if not force_purepython:
-            try:
-                import bsddb.db
-            except ImportError:
-                force_purepython = True
-
-        if not force_purepython:
-            db_env = bsddb.db.DBEnv()
-            wallet_filename = os.path.abspath(wallet_filename)
-            try:
-                db_env.open(os.path.dirname(wallet_filename), bsddb.db.DB_CREATE | bsddb.db.DB_INIT_MPOOL)
-                db = bsddb.db.DB(db_env)
-                db.open(wallet_filename, b"main", bsddb.db.DB_BTREE, bsddb.db.DB_RDONLY)
-            except UnicodeEncodeError:
-                error_exit("the entire path and filename of Bitcoin Core wallets must be entirely ASCII")
-            mkey = db.get(b"\x04mkey\x01\x00\x00\x00")
-            db.close()
-            db_env.close()
-
-        else:
-            def align_32bits(i):  # if not already at one, return the next 32-bit boundry
-                m = i % 4
-                return i if m == 0 else i + 4 - m
-
-            with open(wallet_filename, "rb") as wallet_file:
-                wallet_file.seek(12)
-                assert wallet_file.read(8) == b"\x62\x31\x05\x00\x09\x00\x00\x00", "is a Btree v9 file"
-                mkey = None
-
-                # Don't actually try walking the btree, just look through every btree leaf page
-                # for the value/key pair (yes they are in that order...) we're searching for
-                wallet_file.seek(20)
-                page_size        = struct.unpack(b"<I", wallet_file.read(4))[0]
-                wallet_file_size = os.path.getsize(wallet_filename)
-                for page_base in xrange(page_size, wallet_file_size, page_size):  # skip the header page
-                    wallet_file.seek(page_base + 20)
-                    (item_count, first_item_pos, btree_level, page_type) = struct.unpack(b"< H H B B", wallet_file.read(6))
-                    if page_type != 5 or btree_level != 1:
-                        continue  # skip non-btree and non-leaf pages
-                    pos = align_32bits(page_base + first_item_pos)  # position of the first item
-                    wallet_file.seek(pos)
-                    for i in xrange(item_count):    # for each item in the current page
-                        (item_len, item_type) = struct.unpack(b"< H B", wallet_file.read(3))
-                        if item_type & ~0x80 == 1:  # if it's a variable-length key or value
-                            if item_type == 1:      # if it's not marked as deleted
-                                if i % 2 == 0:      # if it's a value, save it's position
-                                    value_pos = pos + 3
-                                    value_len = item_len
-                                # else it's a key, check if it's the key we're looking for
-                                elif item_len == 9 and wallet_file.read(item_len) == b"\x04mkey\x01\x00\x00\x00":
-                                    wallet_file.seek(value_pos)
-                                    mkey = wallet_file.read(value_len)  # found it!
-                                    break
-                            pos = align_32bits(pos + 3 + item_len)  # calc the position of the next item
-                        else:
-                            pos += 12  # the two other item types have a fixed length
-                        if i + 1 < item_count:  # don't need to seek if this is the last item in the page
-                            assert pos < page_base + page_size, "next item is located in current page"
-                            wallet_file.seek(pos)
-                    else: continue  # if not found on this page, continue to next page
-                    break           # if we broke out of inner loop, break out of this one too
-
-        if not mkey:
-            if force_purepython:
-                print(prog+": warning: bsddb (Berkeley DB) module not found; try installing it to resolve key-not-found errors (see INSTALL.md)", file=sys.stderr)
-            raise ValueError("Encrypted master key #1 not found in the Bitcoin Core wallet file.\n"+
-                             "(is this wallet encrypted? is this a standard Bitcoin Core wallet?)")
-        # This is a little fragile because it assumes the encrypted key and salt sizes are
-        # 48 and 8 bytes long respectively, which although currently true may not always be
-        # (it will loudly fail if this isn't the case; if smarter it could gracefully succeed):
-        self = cls(loading=True)
-        encrypted_master_key, self._salt, method, self._iter_count = struct.unpack_from(b"< 49p 9p I I", mkey)
-        if method != 0: raise NotImplementedError("Unsupported Bitcoin Core key derivation method " + unicode(method))
-
-        # only need the final 2 encrypted blocks (half of it padding) plus the salt and iter_count saved above
-        self._part_encrypted_master_key = encrypted_master_key[-32:]
-        return self
-
-    # Import a Bitcoin Core encrypted master key that was extracted by extract-mkey.py
-    @classmethod
-    def load_from_data_extract(cls, mkey_data):
-        # These are the same partial encrypted_master_key, salt, iter_count retrieved by load_from_filename()
-        self = cls(loading=True)
-        self._part_encrypted_master_key, self._salt, self._iter_count = struct.unpack(b"< 32s 8s I", mkey_data)
-        return self
-
-    def difficulty_info(self):
-        return "{:,} SHA-512 iterations".format(self._iter_count)
-
-    # Defer to either the cpu or OpenCL implementation
-    def return_verified_password_or_false(self, passwords):
-        return self._return_verified_password_or_false_opencl(passwords) if hasattr(self, "_cl_devices") \
-          else self._return_verified_password_or_false_cpu(passwords)
-
-    # This is the time-consuming function executed by worker thread(s). It returns a tuple: if a password
-    # is correct return it, else return False for item 0; return a count of passwords checked for item 1
-    def _return_verified_password_or_false_cpu(self, passwords):
-        # Copy a global into local for a small speed boost
-        l_sha512 = hashlib.sha512
-
-        # Convert Unicode strings (lazily) to UTF-8 bytestrings
-        if mode.tstr == unicode:
-            passwords = itertools.imap(lambda p: p.encode("utf_8", "ignore"), passwords)
-
-        for count, password in enumerate(passwords, 1):
-            derived_key = password + self._salt
-            for i in xrange(self._iter_count):
-                derived_key = l_sha512(derived_key).digest()
-            part_master_key = aes256_cbc_decrypt(derived_key[:32], self._part_encrypted_master_key[:16], self._part_encrypted_master_key[16:])
-            #
-            # If the last block (bytes 16-31) of part_encrypted_master_key is all padding, we've found it
-            if part_master_key == b"\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10":
-                return password if mode.tstr == str else password.decode("utf_8", "replace"), count
-
-        return False, count
-
-    # Load and initialize the OpenCL kernel for Bitcoin Core, given:
-    #   devices - a list of one or more of the devices returned by get_opencl_devices()
-    #   global_ws - a list of global work sizes, exactly one per device
-    #   local_ws  - a list of local work sizes (or Nones), exactly one per device
-    #   int_rate  - number of times to interrupt calculations to prevent hanging
-    #               the GPU driver per call to return_verified_password_or_false()
-    def init_opencl_kernel(self, devices, global_ws, local_ws, int_rate):
-        # Need to save these for return_verified_password_or_false_opencl()
-        assert devices, "WalletBitcoinCore.init_opencl_kernel: at least one device is selected"
-        assert len(devices) == len(global_ws) == len(local_ws), "WalletBitcoinCore.init_opencl_kernel: one global_ws and one local_ws specified for each device"
-        self._cl_devices   = devices
-        self._cl_global_ws = global_ws
-        self._cl_local_ws  = local_ws
-
-        self._cl_kernel = self._cl_queues = self._cl_hashes_buffers = None  # clear any previously loaded
-        cl_context = pyopencl.Context(devices)
-        #
-        # Load and compile the OpenCL program
-        cl_program = pyopencl.Program(cl_context, open(
-            os.path.join(os.path.dirname(os.path.realpath(__file__)), "sha512-bc-kernel.cl"))
-            .read()).build(b"-w")
-        #
-        # Configure and store for later the OpenCL kernel (the entrance function)
-        self._cl_kernel = cl_program.kernel_sha512_bc
-        self._cl_kernel.set_scalar_arg_dtypes([None, numpy.uint32])
-        #
-        # Check the local_ws sizes
-        for i, device in enumerate(devices):
-            if local_ws[i] is None: continue
-            max_local_ws = self._cl_kernel.get_work_group_info(pyopencl.kernel_work_group_info.WORK_GROUP_SIZE, device)
-            if local_ws[i] > max_local_ws:
-                error_exit("--local-ws of", local_ws[i], "exceeds max of", max_local_ws, "for GPU '"+device.name.strip()+"' with Bitcoin Core wallets")
-
-        # Create one command queue and one I/O buffer per device
-        self._cl_queues         = []
-        self._cl_hashes_buffers = []
-        for i, device in enumerate(devices):
-            self._cl_queues.append(pyopencl.CommandQueue(cl_context, device))
-            # Each buffer is of len --global-ws * (size-of-sha512-hash-in-bytes == 512 bits / 8 == 64)
-            self._cl_hashes_buffers.append(pyopencl.Buffer(cl_context, pyopencl.mem_flags.READ_WRITE, global_ws[i] * 64))
-
-        # Doing all iter_count iterations at once will hang the GPU, so instead calculate how
-        # many iterations should be done at a time based on iter_count and the requested int_rate,
-        # rounding up to maximize the number of iterations done in the last set to optimize performance
-        assert hasattr(self, "_iter_count") and self._iter_count, "WalletBitcoinCore.init_opencl_kernel: bitcoin core wallet or mkey has been loaded"
-        self._iter_count_chunksize = self._iter_count // int_rate or 1
-        if self._iter_count_chunksize % int_rate != 0:  # if not evenly divisible,
-            self._iter_count_chunksize += 1             # then round up
-
-    def _return_verified_password_or_false_opencl(self, passwords):
-        assert len(passwords) <= sum(self._cl_global_ws), "WalletBitcoinCore.return_verified_password_or_false_opencl: at most --global-ws passwords"
-
-        # Convert Unicode strings to UTF-8 bytestrings
-        if mode.tstr == unicode:
-            passwords = map(lambda p: p.encode("utf_8", "ignore"), passwords)
-
-        # The first iter_count iteration is done by the CPU
-        hashes = numpy.empty([sum(self._cl_global_ws), 64], numpy.uint8)
-        for i, password in enumerate(passwords):
-            hashes[i] = numpy.frombuffer(hashlib.sha512(password + self._salt).digest(), numpy.uint8)
-
-        # Divide up and copy the starting hashes into the OpenCL buffer(s) (one per device) in parallel
-        done   = []  # a list of OpenCL event objects
-        offset = 0
-        for devnum, ws in enumerate(self._cl_global_ws):
-            done.append(pyopencl.enqueue_copy(self._cl_queues[devnum], self._cl_hashes_buffers[devnum],
-                                              hashes[offset : offset + ws], is_blocking=False))
-            self._cl_queues[devnum].flush()  # Starts the copy operation
-            offset += ws
-        pyopencl.wait_for_events(done)
-
-        # Doing all iter_count iterations at once will hang the GPU, so instead do iter_count_chunksize
-        # iterations at a time, pausing briefly while waiting for them to complete, and then continuing.
-        # Because iter_count is probably not evenly divisible by iter_count_chunksize, the loop below
-        # performs all but the last of these iter_count_chunksize sets of iterations.
-
-        i = 1 - self._iter_count_chunksize  # used if the loop below doesn't run (when --int-rate == 1)
-        for i in xrange(1, self._iter_count - self._iter_count_chunksize, self._iter_count_chunksize):
-            done = []  # a list of OpenCL event objects
-            # Start up a kernel for each device to do one set of iter_count_chunksize iterations
-            for devnum in xrange(len(self._cl_devices)):
-                done.append(self._cl_kernel(self._cl_queues[devnum], (self._cl_global_ws[devnum],),
-                                            None if self._cl_local_ws[devnum] is None else (self._cl_local_ws[devnum],),
-                                            self._cl_hashes_buffers[devnum], self._iter_count_chunksize))
-                self._cl_queues[devnum].flush()  # Starts the kernel
-            pyopencl.wait_for_events(done)
-
-        # Perform the last remaining set of iterations (usually fewer then iter_count_chunksize)
-        done = []  # a list of OpenCL event objects
-        for devnum in xrange(len(self._cl_devices)):
-            done.append(self._cl_kernel(self._cl_queues[devnum], (self._cl_global_ws[devnum],),
-                                        None if self._cl_local_ws[devnum] is None else (self._cl_local_ws[devnum],),
-                                        self._cl_hashes_buffers[devnum], self._iter_count - self._iter_count_chunksize - i))
-            self._cl_queues[devnum].flush()  # Starts the kernel
-        pyopencl.wait_for_events(done)
-
-        # Copy the resulting fully computed hashes back to RAM in parallel
-        done   = []  # a list of OpenCL event objects
-        offset = 0
-        for devnum, ws in enumerate(self._cl_global_ws):
-            done.append(pyopencl.enqueue_copy(self._cl_queues[devnum], hashes[offset : offset + ws],
-                                              self._cl_hashes_buffers[devnum], is_blocking=False))
-            offset += ws
-            self._cl_queues[devnum].flush()  # Starts the copy operation
-        pyopencl.wait_for_events(done)
-
-        # Using the computed hashes, try to decrypt the master key (in CPU)
-        for i, password in enumerate(passwords):
-            derived_key = hashes[i].tostring()
-            part_master_key = aes256_cbc_decrypt(derived_key[:32], self._part_encrypted_master_key[:16], self._part_encrypted_master_key[16:])
-            # If the last block (bytes 16-31) of part_encrypted_master_key is all padding, we've found it
-            if part_master_key == b"\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10":
-                return password if mode.tstr == str else password.decode("utf_8", "replace"), i + 1
-        return False, i + 1
 
 
 @Wallet.register_wallet_class
@@ -483,12 +219,12 @@ class WalletMultiBit(object):
 
     def __init__(self, loading = False):
         assert loading, 'use load_from_* to create a ' + self.__class__.__name__
-        aes_library_name = load_aes256_library().__name__
+        aes_library_name = CryptoUtil.load_aes256_library().__name__
         self._passwords_per_second = 100000 if aes_library_name == "Crypto" else 5000
 
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
-        load_aes256_library(warnings=False)
+        CryptoUtil.load_aes256_library(warnings=False)
         self.__dict__ = state
 
     def passwords_per_seconds(self, seconds):
@@ -526,10 +262,11 @@ class WalletMultiBit(object):
     # This is the time-consuming function executed by worker thread(s). It returns a tuple: if a password
     # is correct return it, else return False for item 0; return a count of passwords checked for item 1
     assert b"1" < b"9" < b"A" < b"Z" < b"a" < b"z"  # the b58 check below assumes ASCII ordering in the interest of speed
+
     def return_verified_password_or_false(self, orig_passwords):
         # Copy a few globals into local for a small speed boost
         l_md5                 = hashlib.md5
-        l_aes256_cbc_decrypt  = aes256_cbc_decrypt
+        l_aes256_cbc_decrypt  = CryptoUtil.aes256_cbc_decrypt
         encrypted_block       = self._encrypted_block
         salt                  = self._salt
 
@@ -630,12 +367,12 @@ class WalletBitcoinj(object):
             self._passwords_per_second = 0.03
         else:
             self._passwords_per_second = 14
-        load_aes256_library()
+        CryptoUtil.load_aes256_library()
 
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
         global pylibscrypt
-        load_aes256_library(warnings=False)
+        CryptoUtil.load_aes256_library(warnings=False)
         self.__dict__ = state
 
     # Load a bitcoinj wallet file (the part of it we need)
@@ -692,7 +429,7 @@ class WalletBitcoinj(object):
     def return_verified_password_or_false(self, passwords):
         # Copy a few globals into local for a small speed boost
         l_scrypt             = pylibscrypt.scrypt
-        l_aes256_cbc_decrypt = aes256_cbc_decrypt
+        l_aes256_cbc_decrypt = CryptoUtil.aes256_cbc_decrypt
         part_encrypted_key   = self._part_encrypted_key
         scrypt_salt          = self._scrypt_salt
         scrypt_n             = self._scrypt_n
@@ -771,7 +508,7 @@ class WalletMultiBitHD(WalletBitcoinj):
     def return_verified_password_or_false(self, passwords):
         # Copy a few globals into local for a small speed boost
         l_scrypt             = pylibscrypt.scrypt
-        l_aes256_cbc_decrypt = aes256_cbc_decrypt
+        l_aes256_cbc_decrypt = CryptoUtil.aes256_cbc_decrypt
         iv                   = self._iv
         encrypted_block_iv   = self._encrypted_block_iv
         encrypted_block_noiv = self._encrypted_block_noiv
@@ -826,19 +563,19 @@ class WalletAndroidSpendingPIN(WalletBitcoinj):
         data = data[16:]
 
         if not password:
-            password = config.prompt_unicode_password(
+            password = prompt_unicode_password(
                 b"Please enter the password for the Bitcoin Wallet for Android/BlackBerry backup: ",
                 "encrypted Bitcoin Wallet for Android/BlackBerry backups must be decrypted before searching for the PIN")
         # Convert Unicode string to a UTF-16 bytestring, truncating each code unit to 8 bits
         password = password.encode("utf_16_le", "ignore")[::2]
 
         # Decrypt the backup file (OpenSSL style)
-        load_aes256_library(force_purepython)
+        CryptoUtil.load_aes256_library(force_purepython)
         salted = password + salt
         key1   = hashlib.md5(salted).digest()
         key2   = hashlib.md5(key1 + salted).digest()
         iv     = hashlib.md5(key2 + salted).digest()
-        data   = aes256_cbc_decrypt(key1 + key2, iv, data)
+        data   = CryptoUtil.aes256_cbc_decrypt(key1 + key2, iv, data)
         from cStringIO import StringIO
         if not WalletBitcoinj.is_wallet_file(StringIO(data[:100])):
             error_exit("can't decrypt wallet (wrong password?)")
@@ -867,12 +604,12 @@ class WalletMsigna(object):
 
     def __init__(self, loading = False):
         assert loading, 'use load_from_* to create a ' + self.__class__.__name__
-        aes_library_name = load_aes256_library().__name__
+        aes_library_name = CryptoUtil.load_aes256_library().__name__
         self._passwords_per_second = 50000 if aes_library_name == "Crypto" else 5000
 
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
-        load_aes256_library(warnings=False)
+        CryptoUtil.load_aes256_library(warnings=False)
         self.__dict__ = state
 
     def passwords_per_seconds(self, seconds):
@@ -958,7 +695,7 @@ class WalletMsigna(object):
             for i in xrange(5):
                 derived_part2 = l_sha1(derived_part2).digest()
             #
-            part_privkey = aes256_cbc_decrypt(derived_part1 + derived_part2[:12], part_encrypted_privkey[:16], part_encrypted_privkey[16:])
+            part_privkey = CryptoUtil.aes256_cbc_decrypt(derived_part1 + derived_part2[:12], part_encrypted_privkey[:16], part_encrypted_privkey[16:])
             #
             # If the last block (bytes 16-31) of part_encrypted_privkey is all padding, we've found it
             if part_privkey == b"\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10":
@@ -974,12 +711,12 @@ class WalletElectrum(object):
 
     def __init__(self, loading = False):
         assert loading, 'use load_from_* to create a ' + self.__class__.__name__
-        aes_library_name = load_aes256_library().__name__
+        aes_library_name = CryptoUtil.load_aes256_library().__name__
         self._passwords_per_second = 100000 if aes_library_name == "Crypto" else 5000
 
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
-        load_aes256_library(warnings=False)
+        CryptoUtil.load_aes256_library(warnings=False)
         self.__dict__ = state
 
     def passwords_per_seconds(self, seconds):
@@ -1018,7 +755,7 @@ class WalletElectrum1(WalletElectrum):
             try:
                 wallet = literal_eval(wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
             except SyntaxError as e:  # translate any SyntaxError into a
-                raise ValueError(e)   # ValueError as expected by config.load_wallet()
+                raise ValueError(e)   # ValueError as expected by load_wallet()
         return cls._load_from_dict(wallet)
 
     @classmethod
@@ -1040,7 +777,7 @@ class WalletElectrum1(WalletElectrum):
     def return_verified_password_or_false(self, passwords):
         # Copy some vars into local for a small speed boost
         l_sha256             = hashlib.sha256
-        l_aes256_cbc_decrypt = aes256_cbc_decrypt
+        l_aes256_cbc_decrypt = CryptoUtil.aes256_cbc_decrypt
         part_encrypted_seed  = self._part_encrypted_data
         iv                   = self._iv
 
@@ -1130,7 +867,7 @@ class WalletElectrum2(WalletElectrum):
                             return self
 
                 else:
-                    print(prog+": warning: found unsupported keystore type " + keystore_type, file=sys.stderr)
+                    print(prog + ": warning: found unsupported keystore type " + keystore_type, file=sys.stderr)
 
             # Electrum 2.7+ multisig or 2fa wallet
             for i in itertools.count(1):
@@ -1181,7 +918,7 @@ class WalletElectrum2(WalletElectrum):
     def return_verified_password_or_false(self, passwords):
         # Copy some vars into local for a small speed boost
         l_sha256             = hashlib.sha256
-        l_aes256_cbc_decrypt = aes256_cbc_decrypt
+        l_aes256_cbc_decrypt = CryptoUtil.aes256_cbc_decrypt
         part_encrypted_xprv  = self._part_encrypted_data
         iv                   = self._iv
 
@@ -1218,7 +955,7 @@ class WalletElectrumLooseKey(WalletElectrum):
     def return_verified_password_or_false(self, passwords):
         # Copy some vars into local for a small speed boost
         l_sha256              = hashlib.sha256
-        l_aes256_cbc_decrypt  = aes256_cbc_decrypt
+        l_aes256_cbc_decrypt  = CryptoUtil.aes256_cbc_decrypt
         encrypted_privkey_end = self._part_encrypted_data
         iv                    = self._iv
 
@@ -1244,6 +981,7 @@ class WalletElectrumLooseKey(WalletElectrum):
 
 @Wallet.register_wallet_class
 class WalletElectrum28(object):
+    coincurve = None
 
     def passwords_per_seconds(self, seconds):
         return max(int(round(self._passwords_per_second * seconds)), 1)
@@ -1255,11 +993,13 @@ class WalletElectrum28(object):
         except TypeError: return False
         return data[:4] == b"BIE1"  # Electrum 2.8+ magic
 
-    def __init__(self, loading = False):
+    def __init__(self, loading=False):
         assert loading, 'use load_from_* to create a ' + self.__class__.__name__
-        global hmac, coincurve
-        pbkdf2_library_name    = load_pbkdf2_library().__name__
-        self._aes_library_name = load_aes256_library().__name__
+        import coincurve, hmac
+        self.__class__.hmac = hmac
+        self.__class__.coincurve = coincurve
+        pbkdf2_library_name = CryptoUtil.load_pbkdf2_library().__name__
+        self._aes_library_name = CryptoUtil.load_aes256_library().__name__
         self._passwords_per_second = 800 if pbkdf2_library_name == "hashlib" else 140
 
     def __getstate__(self):
@@ -1270,10 +1010,11 @@ class WalletElectrum28(object):
 
     def __setstate__(self, state):
         # Restore coincurve.PublicKey object and (re-)load the required libraries
-        global hmac, coincurve
-        import coincurve
-        load_pbkdf2_library(warnings=False)
-        load_aes256_library(warnings=False)
+        import hmac, coincurve
+        self.__class__.hmac = hmac
+        self.__class__.coincurve = coincurve
+        CryptoUtil.load_pbkdf2_library(warnings=False)
+        CryptoUtil.load_aes256_library(warnings=False)
         self.__dict__ = state
         self._ephemeral_pubkey = coincurve.PublicKey(self._ephemeral_pubkey)
 
@@ -1293,11 +1034,11 @@ class WalletElectrum28(object):
         assert data[:4] == b"BIE1", "wallet file has Electrum 2.8+ magic"
 
         self = cls(loading=True)
-        self._ephemeral_pubkey = coincurve.PublicKey(data[4:37])
-        self._ciphertext_beg   = data[37:37+16]  # first ciphertext block
-        self._ciphertext_end   = data[-64:-32]   # last two blocks (before mac)
-        self._mac              = data[-32:]
-        self._all_but_mac      = data[:-32]
+        self._ephemeral_pubkey = cls.coincurve.PublicKey(data[4:37])
+        self._ciphertext_beg = data[37:37+16]  # first ciphertext block
+        self._ciphertext_end = data[-64:-32]   # last two blocks (before mac)
+        self._mac = data[-32:]
+        self._all_but_mac = data[:-32]
         return self
 
     def difficulty_info(self):
@@ -1306,7 +1047,7 @@ class WalletElectrum28(object):
     # This is the time-consuming function executed by worker thread(s). It returns a tuple: if a password
     # is correct return it, else return False for item 0; return a count of passwords checked for item 1
     def return_verified_password_or_false(self, passwords):
-        cutils = coincurve.utils
+        cutils = self.coincurve.utils
 
         # Convert Unicode strings (lazily) to UTF-8 bytestrings
         if mode.tstr == unicode:
@@ -1315,27 +1056,27 @@ class WalletElectrum28(object):
         for count, password in enumerate(passwords, 1):
 
             # Derive the ECIES shared public key, and from it, the AES and HMAC keys
-            static_privkey = pbkdf2_hmac(b"sha512", password, b"", 1024, 64)
+            static_privkey = CryptoUtil.pbkdf2_hmac(b"sha512", password, b"", 1024, 64)
             # Electrum uses a 512-bit private key (why?), but libsecp256k1 expects a 256-bit key < group's order:
-            static_privkey = cutils.int_to_bytes( cutils.bytes_to_int(static_privkey) % cutils.GROUP_ORDER_INT )
-            shared_pubkey  = self._ephemeral_pubkey.multiply(static_privkey).format()
-            keys           = hashlib.sha512(shared_pubkey).digest()
+            static_privkey = cutils.int_to_bytes(cutils.bytes_to_int(static_privkey) % cutils.GROUP_ORDER_INT )
+            shared_pubkey = self._ephemeral_pubkey.multiply(static_privkey).format()
+            keys = hashlib.sha512(shared_pubkey).digest()
 
             # Only run these initial checks if we have a fast AES library
             if self._aes_library_name != 'aespython':
                 # Check for the expected zlib and deflate headers in the first 16-byte decrypted block
-                plaintext_block = aes256_cbc_decrypt(keys[16:32], keys[:16], self._ciphertext_beg)  # key, iv, ciphertext
+                plaintext_block = CryptoUtil.aes256_cbc_decrypt(keys[16:32], keys[:16], self._ciphertext_beg)  # key, iv, ciphertext
                 if not (plaintext_block.startswith(b"\x78\x9c") and ord(plaintext_block[2]) & 0x7 == 0x5):
                     continue
 
                 # Check for valid PKCS7 padding in the last 16-byte decrypted block
-                plaintext_block = aes256_cbc_decrypt(keys[16:32], self._ciphertext_end[:16], self._ciphertext_end[16:])  # key, iv, ciphertext
+                plaintext_block = CryptoUtil.aes256_cbc_decrypt(keys[16:32], self._ciphertext_end[:16], self._ciphertext_end[16:])  # key, iv, ciphertext
                 padding_len = ord(plaintext_block[-1])
                 if not (1 <= padding_len <= 16 and plaintext_block.endswith(chr(padding_len) * padding_len)):
                     continue
 
             # Check the MAC
-            computed_mac = hmac.new(keys[32:], self._all_but_mac, hashlib.sha256).digest()
+            computed_mac = self.hmac.new(keys[32:], self._all_but_mac, hashlib.sha256).digest()
             if computed_mac == self._mac:
                 return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
@@ -1356,8 +1097,8 @@ class WalletBlockchain(object):
 
     def __init__(self, iter_count, loading = False):
         assert loading, 'use load_from_* to create a ' + self.__class__.__name__
-        pbkdf2_library_name = load_pbkdf2_library().__name__
-        aes_library_name    = load_aes256_library().__name__
+        pbkdf2_library_name = CryptoUtil.load_pbkdf2_library().__name__
+        aes_library_name    = CryptoUtil.load_aes256_library().__name__
         self._iter_count           = iter_count
         self._passwords_per_second = 400000 if pbkdf2_library_name == "hashlib" else 100000
         if iter_count == 0:  # if it's a v0 wallet
@@ -1368,8 +1109,8 @@ class WalletBlockchain(object):
 
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
-        load_pbkdf2_library(warnings=False)
-        load_aes256_library(warnings=False)
+        CryptoUtil.load_pbkdf2_library(warnings=False)
+        CryptoUtil.load_aes256_library(warnings=False)
         self.__dict__ = state
 
     def passwords_per_seconds(self, seconds):
@@ -1458,9 +1199,9 @@ class WalletBlockchain(object):
     # is correct return it, else return False for item 0; return a count of passwords checked for item 1
     def return_verified_password_or_false(self, passwords):
         # Copy a few globals into local for a small speed boost
-        l_pbkdf2_hmac        = pbkdf2_hmac
-        l_aes256_cbc_decrypt = aes256_cbc_decrypt
-        l_aes256_ofb_decrypt = aes256_ofb_decrypt
+        l_pbkdf2_hmac        = CryptoUtil.pbkdf2_hmac
+        l_aes256_cbc_decrypt = CryptoUtil.aes256_cbc_decrypt
+        l_aes256_ofb_decrypt = CryptoUtil.aes256_ofb_decrypt
         encrypted_block      = self._encrypted_block
         salt_and_iv          = self._salt_and_iv
         iter_count           = self._iter_count
@@ -1491,6 +1232,7 @@ class WalletBlockchain(object):
                     return password if mode.tstr == str else password.decode("utf_8", "replace"), count
 
         return False, count
+
 
 @Wallet.register_wallet_class
 class WalletBlockchainSecondpass(WalletBlockchain):
@@ -1525,28 +1267,28 @@ class WalletBlockchainSecondpass(WalletBlockchain):
         else:
             # If there were no problems getting the encrypted data, decrypt it
             if not password:
-                password = config.prompt_unicode_password(
+                password = prompt_unicode_password(
                     b"Please enter the Blockchain wallet's main password: ",
                     "encrypted Blockchain files must be decrypted before searching for the second password")
             password = password.encode("utf_8")
             data, salt_and_iv = data[16:], data[:16]
-            load_pbkdf2_library(force_purepython)
-            load_aes256_library(force_purepython)
+            CryptoUtil.load_pbkdf2_library(force_purepython)
+            CryptoUtil.load_aes256_library(force_purepython)
             #
             # These are a bit fragile in the interest of simplicity because they assume the guid is the first
             # name in the JSON object, although this has always been the case as of 6/2014 (since 12/2011)
             #
             # Encryption scheme used in newer wallets
             def decrypt_current(iter_count):
-                key = pbkdf2_hmac(b"sha1", password, salt_and_iv, iter_count, 32)
-                decrypted = aes256_cbc_decrypt(key, salt_and_iv, data)    # CBC mode
+                key = CryptoUtil.pbkdf2_hmac(b"sha1", password, salt_and_iv, iter_count, 32)
+                decrypted = CryptoUtil.aes256_cbc_decrypt(key, salt_and_iv, data)    # CBC mode
                 padding   = ord(decrypted[-1:])                           # ISO 10126 padding length
                 return decrypted[:-padding] if 1 <= padding <= 16 and re.match(b'{\s*"guid"', decrypted) else None
             #
             # Encryption scheme only used in version 0.0 wallets (N.B. this is untested)
             def decrypt_old():
-                key = pbkdf2_hmac(b"sha1", password, salt_and_iv, 1, 32)  # only 1 iteration
-                decrypted  = aes256_ofb_decrypt(key, salt_and_iv, data)   # OFB mode
+                key = CryptoUtil.pbkdf2_hmac(b"sha1", password, salt_and_iv, 1, 32)  # only 1 iteration
+                decrypted  = CryptoUtil.aes256_ofb_decrypt(key, salt_and_iv, data)   # OFB mode
                 # The 16-byte last block, reversed, with all but the first byte of ISO 7816-4 padding removed:
                 last_block = tuple(itertools.dropwhile(lambda x: x==b"\0", decrypted[:15:-1]))
                 padding    = 17 - len(last_block)                         # ISO 7816-4 padding length
@@ -1664,7 +1406,7 @@ class WalletBither(object):
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
         global pylibscrypt, coincurve
-        load_aes256_library(warnings=False)
+        CryptoUtil.load_aes256_library(warnings=False)
         self.__dict__ = state
 
     # Load a Bither wallet file (the part of it we need)
@@ -1772,7 +1514,7 @@ class WalletBither(object):
     def return_verified_password_or_false(self, passwords):
         # Copy a few globals into local for a small speed boost
         l_scrypt             = pylibscrypt.scrypt
-        l_aes256_cbc_decrypt = aes256_cbc_decrypt
+        l_aes256_cbc_decrypt = CryptoUtil.aes256_cbc_decrypt
         l_sha256             = hashlib.sha256
         hashlib_new          = hashlib.new
         iv_encrypted_key     = self._iv_encrypted_key  # 16-byte iv + encrypted_key
@@ -1824,7 +1566,9 @@ class WalletBIP39(object):
             error_exit("--wallet-type must be one of: bitcoin, ethereum")
 
         global normalize, hmac
-        load_pbkdf2_library()
+        from unicodedata import normalize
+        import hmac
+        CryptoUtil.load_pbkdf2_library()
 
         # Create a btcrseed.WalletBIP39 object which will do most of the work;
         # this also interactively prompts the user if not enough command-line options were included
@@ -1853,7 +1597,9 @@ class WalletBIP39(object):
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
         global normalize, hmac
-        load_pbkdf2_library(warnings=False)
+        from unicodedata import normalize
+        import hmac
+        CryptoUtil.load_pbkdf2_library(warnings=False)
         self.__dict__ = state
 
     def passwords_per_seconds(self, seconds):
@@ -1870,7 +1616,7 @@ class WalletBIP39(object):
             passwords = itertools.imap(lambda p: normalize("NFKD", p).encode("utf_8", "ignore"), passwords)
 
         for count, password in enumerate(passwords, 1):
-            seed_bytes = pbkdf2_hmac(b"sha512", self._mnemonic, b"mnemonic" + password, 2048)
+            seed_bytes = CryptoUtil.pbkdf2_hmac(b"sha512", self._mnemonic, b"mnemonic" + password, 2048)
             seed_bytes = hmac.new(b"Bitcoin seed", seed_bytes, hashlib.sha512).digest()
             if self.btcrseed_wallet._verify_seed(seed_bytes):
                 return password if mode.tstr == str else password.decode("utf_8", "replace"), count
@@ -1889,71 +1635,6 @@ class WalletNull(object):
 
     def return_verified_password_or_false(self, passwords):
         return False, len(passwords)
-
-
-# Creates two decryption functions (in global namespace), aes256_cbc_decrypt() and aes256_ofb_decrypt(),
-# using either PyCrypto if it's available or a pure python library. The created functions each take
-# three bytestring arguments: key, iv, ciphertext. ciphertext must be a multiple of 16 bytes, and any
-# padding present is not stripped.
-missing_pycrypto_warned = False
-def load_aes256_library(force_purepython = False, warnings = True):
-    global aes256_cbc_decrypt, aes256_ofb_decrypt, missing_pycrypto_warned
-    if not force_purepython:
-        try:
-            import Crypto.Cipher.AES
-            new_aes = Crypto.Cipher.AES.new
-            aes256_cbc_decrypt = lambda key, iv, ciphertext: \
-                new_aes(key, Crypto.Cipher.AES.MODE_CBC, iv).decrypt(ciphertext)
-            aes256_ofb_decrypt = lambda key, iv, ciphertext: \
-                new_aes(key, Crypto.Cipher.AES.MODE_OFB, iv).decrypt(ciphertext)
-            return Crypto  # just so the caller can check which version was loaded
-        except ImportError:
-            if warnings and not missing_pycrypto_warned:
-                print(prog+": warning: can't find PyCrypto, using aespython instead", file=sys.stderr)
-                missing_pycrypto_warned = True
-
-    # This version is attributed to GitHub user serprex; please see the aespython
-    # README.txt for more information. It measures over 30x faster than the more
-    # common "slowaes" package (although it's still 30x slower than the PyCrypto)
-    #
-    import aespython
-    expandKey = aespython.key_expander.expandKey
-    AESCipher = aespython.aes_cipher.AESCipher
-    def aes256_decrypt_factory(BlockMode):
-        def aes256_decrypt(key, iv, ciphertext):
-            block_cipher  = AESCipher( expandKey(bytearray(key)) )
-            stream_cipher = BlockMode(block_cipher, 16)
-            stream_cipher.set_iv(bytearray(iv))
-            plaintext = bytearray()
-            for i in xrange(0, len(ciphertext), 16):
-                plaintext.extend( stream_cipher.decrypt_block(bytearray(ciphertext[i:i+16])) )  # input must be a list
-            return str(plaintext)
-        return aes256_decrypt
-    aes256_cbc_decrypt = aes256_decrypt_factory(aespython.CBCMode)
-    aes256_ofb_decrypt = aes256_decrypt_factory(aespython.OFBMode)
-    return aespython  # just so the caller can check which version was loaded
-
-
-# Creates a key derivation function (in global namespace) named pbkdf2_hmac() using either the
-# hashlib.pbkdf2_hmac from Python 2.7.8+ if it's available, or a pure python library (passlib).
-# The created function takes a hash name, two bytestring arguments and two integer arguments:
-# hash_name (e.g. b"sha1"), password, salt, iter_count, key_len (the length of the returned key)
-missing_pbkdf2_warned = False
-def load_pbkdf2_library(force_purepython = False, warnings = True):
-    global pbkdf2_hmac, missing_pbkdf2_warned
-    if not force_purepython:
-        try:
-            pbkdf2_hmac = hashlib.pbkdf2_hmac
-            return hashlib  # just so the caller can check which version was loaded
-        except AttributeError:
-            if warnings and not missing_pbkdf2_warned:
-                print(prog+": warning: hashlib.pbkdf2_hmac requires Python 2.7.8+, using passlib instead", file=sys.stderr)
-                missing_pbkdf2_warned = True
-    #
-    import passlib.utils.pbkdf2
-    passlib_pbkdf2 = passlib.utils.pbkdf2.pbkdf2
-    pbkdf2_hmac = lambda hash_name, *args: passlib_pbkdf2(*args, prf= b"hmac-" + hash_name)
-    return passlib  # just so the caller can check which version was loaded
 
 
 ################################### Argument Parsing ###################################
@@ -2474,8 +2155,8 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         sys.exit(0)
 
     # Version information is always printed by btcrecover.py, so just exit
-    if args.version: sys.exit(0)
-
+    if args.version:
+        sys.exit(0)
 
     if args.performance and (base_iterator or args.passwordlist or args.tokenlist):
         error_exit("--performance cannot be used with --tokenlist or --passwordlist")
@@ -2849,7 +2530,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         elif args.wallet == "__null":
             Wallet.set_loaded_wallet(WalletNull())
         else:
-            config.load_global_wallet(args.wallet)
+            Wallet.load_global_wallet(args.wallet)
             if type(Wallet.get_loaded_wallet()) is WalletBitcoinj:
                 print(prog+": notice: for MultiBit, use a .key file instead of a .wallet file if possible")
             if isinstance(Wallet.get_loaded_wallet(), WalletMultiBit) and not args.android_pin:
@@ -2876,7 +2557,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
             except AttributeError: pass
             key_crc_base64 = raw_input(key_prompt)
         #
-        # Emulates config.load_global_wallet(), but using the base64 key data instead of a wallet
+        # Emulates load_global_wallet(), but using the base64 key data instead of a wallet
         # file (this sets the loaded_wallet global, and returns the validated CRC)
         key_crc = Wallet.load_from_base64_key(key_crc_base64)
         #

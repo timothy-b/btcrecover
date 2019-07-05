@@ -1,7 +1,7 @@
 from __future__ import print_function
 import os, sys
 
-prog = os.path.basename(sys.argv[0])
+program_name = os.path.basename(sys.argv[0])
 
 # Replace the builtin print with one which won't die when attempts are made to print
 # unicode strings which contain characters unsupported by the destination console
@@ -35,4 +35,4 @@ print = safe_print
 
 # Calls sys.exit with an error message, taking unnamed arguments as print() does
 def error_exit(*messages):
-    sys.exit(b" ".join(map(str, _do_safe_print(prog+": error:", *messages))))
+    sys.exit(b" ".join(map(str, _do_safe_print(program_name + ": error:", *messages))))

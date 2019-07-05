@@ -33,7 +33,7 @@ import warnings, os, unittest, cPickle, tempfile, shutil, multiprocessing, time,
 if __name__ == b'__main__':
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from btcrecover import btcrpass, Wallet, WalletArmory
+from btcrecover import btcrpass, Wallet, WalletArmory, CryptoUtil
 
 
 class NonClosingBase(object):
@@ -915,14 +915,14 @@ def can_load_pycrypto():
     global is_pycrypto_loadable
     if is_pycrypto_loadable is None:
         print(warnings.filters)
-        is_pycrypto_loadable = btcrpass.load_aes256_library().__name__ == b"Crypto"
+        is_pycrypto_loadable = CryptoUtil.load_aes256_library().__name__ == b"Crypto"
     return is_pycrypto_loadable
 
 is_hashlib_pbkdf2_available = None
 def has_hashlib_pbkdf2():
     global is_hashlib_pbkdf2_available
     if is_hashlib_pbkdf2_available is None:
-        is_hashlib_pbkdf2_available = btcrpass.load_pbkdf2_library().__name__ == b"hashlib"
+        is_hashlib_pbkdf2_available = CryptoUtil.load_pbkdf2_library().__name__ == b"hashlib"
     return is_hashlib_pbkdf2_available
 
 is_armory_loadable = None
@@ -1000,8 +1000,8 @@ def can_load_coincurve():
 def init_worker(wallet, char_mode, force_purepython, force_kdf_purepython):
     btcrpass.loaded_wallet = None
     btcrpass.init_worker(wallet, char_mode)
-    if force_purepython:     btcrpass.load_aes256_library(force_purepython=True)
-    if force_kdf_purepython: btcrpass.load_pbkdf2_library(force_purepython=True)
+    if force_purepython:     CryptoUtil.load_aes256_library(force_purepython=True)
+    if force_kdf_purepython: CryptoUtil.load_pbkdf2_library(force_purepython=True)
 
 
 class Test07WalletDecryption(unittest.TestCase):
@@ -1030,8 +1030,8 @@ class Test07WalletDecryption(unittest.TestCase):
             else:
                 wallet = Wallet.load_wallet(temp_wallet_filename)
 
-            if force_purepython:     btcrpass.load_aes256_library(force_purepython=True)
-            if force_kdf_purepython: btcrpass.load_pbkdf2_library(force_purepython=True)
+            if force_purepython:     CryptoUtil.load_aes256_library(force_purepython=True)
+            if force_kdf_purepython: CryptoUtil.load_pbkdf2_library(force_purepython=True)
 
             if not correct_pass:
                 correct_pass = "btcr-test-password"
@@ -1262,7 +1262,7 @@ class Test08BIP39Passwords(unittest.TestCase):
     def bip39_tester(self, force_purepython = False, unicode_pw = False, *args, **kwargs):
 
         wallet = btcrpass.WalletBIP39(*args, **kwargs)
-        if force_purepython: btcrpass.load_pbkdf2_library(force_purepython=True)
+        if force_purepython: CryptoUtil.load_pbkdf2_library(force_purepython=True)
 
         # Perform the tests in the current process
         correct_pass = tstr("btcr-test-password") if not unicode_pw else "btcr-тест-пароль"
@@ -1350,8 +1350,8 @@ class Test08KeyDecryption(unittest.TestCase):
 
     def key_tester(self, key_crc_base64, force_purepython = False, force_kdf_purepython = False, unicode_pw = False):
         Wallet.load_from_base64_key(key_crc_base64)
-        if force_purepython:     btcrpass.load_aes256_library(force_purepython=True)
-        if force_kdf_purepython: btcrpass.load_pbkdf2_library(force_purepython=True)
+        if force_purepython:     CryptoUtil.load_aes256_library(force_purepython=True)
+        if force_kdf_purepython: CryptoUtil.load_pbkdf2_library(force_purepython=True)
 
         correct_pw = tstr("btcr-test-password") if not unicode_pw else "btcr-тест-пароль"
         self.assertEqual(btcrpass.return_verified_password_or_false(

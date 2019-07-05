@@ -32,7 +32,7 @@ from __future__ import print_function, absolute_import, division
 import warnings, unittest, os, tempfile, shutil, filecmp, sys, hashlib, random, mmap, pickle
 if __name__ == b'__main__':
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-from btcrecover import btcrseed
+from btcrecover import btcrseed, Wallet
 from btcrecover.addressset import AddressSet
 
 wallet_dir = os.path.join(os.path.dirname(__file__), "test-wallets")
@@ -66,7 +66,7 @@ class TestRecoveryFromWallet(unittest.TestCase):
             temp_wallet_filename = os.path.join(temp_dir, wallet_basename)
             shutil.copyfile(wallet_filename, temp_wallet_filename)
 
-            wallet = btcrseed.btcrpass.load_wallet(temp_wallet_filename)
+            wallet = Wallet.load_wallet(temp_wallet_filename)
 
             # Convert the mnemonic string into a mnemonic_ids_guess
             wallet.config_mnemonic(correct_mnemonic, **kwds)
@@ -442,8 +442,8 @@ class TestSeedTypos(unittest.TestCase):
         correct_mnemonic = correct_mnemonic.split()
         assert mnemonic_guess.split() != correct_mnemonic
         assert typos or big_typos
-        btcrseed.loaded_wallet = btcrseed.WalletBIP39.create_from_params(mpk=the_mpk)
-        btcrseed.loaded_wallet.config_mnemonic(mnemonic_guess)
+        Wallet.set_loaded_wallet(btcrseed.WalletBIP39.create_from_params(mpk=the_mpk))
+        Wallet.get_loaded_wallet().config_mnemonic(mnemonic_guess)
         self.assertEqual(
             btcrseed.run_btcrecover(typos or big_typos, big_typos, extra_args="--threads 1".split()),
             tuple(correct_mnemonic))
