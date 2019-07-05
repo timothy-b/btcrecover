@@ -29,7 +29,10 @@
 # (all optional futures for 2.7)
 from __future__ import print_function, absolute_import, division, unicode_literals
 
-import warnings, os, unittest, cPickle, tempfile, shutil, multiprocessing, time, gc, filecmp, sys, hashlib
+import warnings, os, unittest, cPickle, tempfile, shutil, multiprocessing, gc, filecmp, sys, hashlib
+
+from btcrecover.modules.wallets.bip_39 import WalletBIP39
+
 if __name__ == b'__main__':
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -1261,7 +1264,7 @@ class Test08BIP39Passwords(unittest.TestCase):
 
     def bip39_tester(self, force_purepython = False, unicode_pw = False, *args, **kwargs):
 
-        wallet = btcrpass.WalletBIP39(*args, **kwargs)
+        wallet = WalletBIP39(*args, **kwargs)
         if force_purepython: CryptoUtil.load_pbkdf2_library(force_purepython=True)
 
         # Perform the tests in the current process
@@ -1661,7 +1664,7 @@ class Test08KeyDecryption(unittest.TestCase):
     @skipUnless(has_any_opencl_devices,          "requires OpenCL and a compatible device")
     @skipUnless(lambda: sys.platform != "win32", "windows kills and restarts drivers which take too long")
     def test_bitcoincore_cl_no_interrupts(self):
-        btcrpass.load_from_base64_key("YmM65iRhIMReOQ2qaldHbn++T1fYP3nXX5tMHbaA/lqEbLhFk6/1Y5F5x0QJAQBI/maR")
+        Wallet.load_from_base64_key("YmM65iRhIMReOQ2qaldHbn++T1fYP3nXX5tMHbaA/lqEbLhFk6/1Y5F5x0QJAQBI/maR")
 
         dev_names_tested = set()
         for dev in btcrpass.get_opencl_devices():
@@ -1683,7 +1686,7 @@ class Test08KeyDecryption(unittest.TestCase):
         else:
             self.skipTest("requires two identical OpenCL devices")
 
-        btcrpass.load_from_base64_key("YmM65iRhIMReOQ2qaldHbn++T1fYP3nXX5tMHbaA/lqEbLhFk6/1Y5F5x0QJAQBI/maR")
+        Wallet.load_from_base64_key("YmM65iRhIMReOQ2qaldHbn++T1fYP3nXX5tMHbaA/lqEbLhFk6/1Y5F5x0QJAQBI/maR")
         self.init_opencl_kernel([devices_by_name[dev.name], dev], [2, 2])
 
         self.assertEqual(btcrpass.return_verified_password_or_false(
@@ -1696,7 +1699,7 @@ class Test08KeyDecryption(unittest.TestCase):
     @skipUnless(can_load_armory,        "requires Armory and ASCII mode")
     @skipUnless(has_any_opencl_devices, "requires OpenCL and a compatible device")
     def test_armory_cl(self):
-        btcrpass.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
+        Wallet.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
 
         dev_names_tested = set()
         for dev in btcrpass.get_opencl_devices():
@@ -1714,7 +1717,7 @@ class Test08KeyDecryption(unittest.TestCase):
     @skipUnless(can_load_armory,        "requires Armory and ASCII mode")
     @skipUnless(has_any_opencl_devices, "requires OpenCL and a compatible device")
     def test_armory_cl_mem_factor(self):
-        btcrpass.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
+        Wallet.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
 
         dev_names_tested = set()
         for dev in btcrpass.get_opencl_devices():
@@ -1733,7 +1736,7 @@ class Test08KeyDecryption(unittest.TestCase):
     @skipUnless(has_any_opencl_devices,          "requires OpenCL and a compatible device")
     @skipUnless(lambda: sys.platform != "win32", "windows kills and restarts drivers which take too long")
     def test_armory_cl_no_interrupts(self):
-        btcrpass.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
+        Wallet.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
 
         dev_names_tested = set()
         for dev in btcrpass.get_opencl_devices():
@@ -1756,7 +1759,7 @@ class Test08KeyDecryption(unittest.TestCase):
         else:
             self.skipTest("requires two identical OpenCL devices")
 
-        btcrpass.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
+        Wallet.load_from_base64_key("YXI6r7mks1qvph4G+rRT7WlIptdr9qDqyFTfXNJ3ciuWJ12BgWX5Il+y28hLNr/u4Wl49hUi4JBeq6Jz9dVBX3vAJ6476FEAACAABAAAAGGwnwXRpPbBzC5lCOBVVWDu7mUJetBOBvzVAv0IbrboDXqA8A==")
         self.init_opencl_kernel([devices_by_name[dev.name], dev], [4, 4])
 
         self.assertEqual(btcrpass.return_verified_password_or_false(
