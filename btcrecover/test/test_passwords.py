@@ -32,7 +32,8 @@ from __future__ import print_function, absolute_import, division, unicode_litera
 import warnings, os, unittest, cPickle, tempfile, shutil, multiprocessing, time, gc, filecmp, sys, hashlib
 if __name__ == b'__main__':
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-from btcrecover import btcrpass
+
+from btcrecover import btcrpass, Wallet, WalletArmory
 
 
 class NonClosingBase(object):
@@ -933,7 +934,7 @@ def can_load_armory():
     # (calling more than once on success is OK though)
     if is_armory_loadable is None:
         try:
-            btcrpass.load_armory_library()
+            WalletArmory.load_armory_library()
             is_armory_loadable = True
         except ImportError:
             is_armory_loadable = False
@@ -1027,7 +1028,7 @@ class Test07WalletDecryption(unittest.TestCase):
                 wallet = btcrpass.WalletBitcoinCore.load_from_filename(
                     temp_wallet_filename, force_bsddb_purepython)
             else:
-                wallet = btcrpass.load_wallet(temp_wallet_filename)
+                wallet = Wallet.load_wallet(temp_wallet_filename)
 
             if force_purepython:     btcrpass.load_aes256_library(force_purepython=True)
             if force_kdf_purepython: btcrpass.load_pbkdf2_library(force_purepython=True)
@@ -1252,7 +1253,7 @@ class Test07WalletDecryption(unittest.TestCase):
 
     def test_invalid_wallet(self):
         with self.assertRaises(SystemExit) as cm:
-            btcrpass.load_wallet(__file__)
+            Wallet.load_wallet(__file__)
         self.assertIn("unrecognized wallet format", cm.exception.code)
 
 
@@ -1348,7 +1349,7 @@ def has_any_opencl_devices():
 class Test08KeyDecryption(unittest.TestCase):
 
     def key_tester(self, key_crc_base64, force_purepython = False, force_kdf_purepython = False, unicode_pw = False):
-        btcrpass.load_from_base64_key(key_crc_base64)
+        Wallet.load_from_base64_key(key_crc_base64)
         if force_purepython:     btcrpass.load_aes256_library(force_purepython=True)
         if force_kdf_purepython: btcrpass.load_pbkdf2_library(force_purepython=True)
 
@@ -1617,17 +1618,17 @@ class Test08KeyDecryption(unittest.TestCase):
 
     def init_opencl_kernel(self, devices, global_ws, int_rate = 200, **kwds):
         try:
-            btcrpass.loaded_wallet.init_opencl_kernel(devices, global_ws, global_ws, int_rate, **kwds)
+            Wallet.get_loaded_wallet().init_opencl_kernel(devices, global_ws, global_ws, int_rate, **kwds)
         except SystemExit as e:
             # this can happen with OpenCL CPUs whose max local-ws is 1, see #104
             if isinstance(e.code, basestring) and "local-ws" in e.code and "exceeds max" in e.code:
-                btcrpass.loaded_wallet.init_opencl_kernel(devices, global_ws, [None] * len(global_ws), int_rate, **kwds)
+                Wallet.get_loaded_wallet().init_opencl_kernel(devices, global_ws, [None] * len(global_ws), int_rate, **kwds)
             else:
                 raise
 
     @skipUnless(has_any_opencl_devices, "requires OpenCL and a compatible device")
     def test_bitcoincore_cl(self):
-        btcrpass.load_from_base64_key("YmM65iRhIMReOQ2qaldHbn++T1fYP3nXX5tMHbaA/lqEbLhFk6/1Y5F5x0QJAQBI/maR")
+        Wallet.load_from_base64_key("YmM65iRhIMReOQ2qaldHbn++T1fYP3nXX5tMHbaA/lqEbLhFk6/1Y5F5x0QJAQBI/maR")
 
         dev_names_tested = set()
         for dev in btcrpass.get_opencl_devices():
@@ -1645,7 +1646,7 @@ class Test08KeyDecryption(unittest.TestCase):
     @skipUnless(lambda: tstr == unicode, "Unicode mode only")
     @skipUnless(has_any_opencl_devices,  "requires OpenCL and a compatible device")
     def test_bitcoincore_cl_unicode(self):
-        btcrpass.load_from_base64_key("YmM6XAL2X19VfzlKJfc+7LIeNrB2KC8E9DWe1YhhOchPoClvwftbuqjXKkfdAAARmggo")
+        Wallet.load_from_base64_key("YmM6XAL2X19VfzlKJfc+7LIeNrB2KC8E9DWe1YhhOchPoClvwftbuqjXKkfdAAARmggo")
 
         dev_names_tested = set()
         for dev in btcrpass.get_opencl_devices():

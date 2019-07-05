@@ -29,11 +29,35 @@
 # (all optional futures for 2.7)
 from __future__ import print_function, absolute_import, division, unicode_literals
 
+import argparse
+import atexit
+import base64
+import cPickle
+import collections
+import gc
+import hashlib
+import itertools
+import json
+import math
+import multiprocessing
+import numbers
+import os
+import re
+import signal
+import struct
+import sys
+import time
+import timeit
+
+import btcrecover.modules.configurables as config
+import btcrecover.modules.mode as mode
+from btcrecover.modules.wallets.armory import WalletArmory
+from btcrecover.modules.wallets.wallet import Wallet
+
 __version__          =  "0.17.10"
 __ordering_version__ = b"0.6.4"  # must be updated whenever password ordering changes
 
-import sys, argparse, itertools, string, re, multiprocessing, signal, os, cPickle, gc, \
-    time, timeit, hashlib, collections, base64, struct, atexit, zlib, math, json, numbers
+
 
 # The progressbar module is recommended but optional; it is typically
 # distributed with btcrecover (it is loaded later on demand)
@@ -49,88 +73,13 @@ def full_version():
         sys.maxint.bit_length() + 1
     )
 
-import btcrecover.modules.mode as mode
+
+
 
 enable_ascii_mode = mode.enable_ascii_mode
 enable_unicode_mode = mode.enable_unicode_mode
 
-import btcrecover.modules.configurables as config
 
-# A class decorator which adds a wallet class to the registered list
-wallet_types       = []
-wallet_types_by_id = {}
-def register_wallet_class(cls):
-    global wallet_types, wallet_types_by_id
-    wallet_types.append(cls)
-    try:
-        assert cls.data_extract_id not in wallet_types_by_id,\
-            "register_wallet_class: registered wallet types must have unique data_extract_id's"
-        wallet_types_by_id[cls.data_extract_id] = cls
-    except AttributeError: pass
-    return cls
-
-# Clears the current set of registered wallets (including those registered by default below)
-def clear_registered_wallets():
-    global wallet_types, wallet_types_by_id
-    wallet_types       = []
-    wallet_types_by_id = {}
-
-# The max wallet file size in bytes (prevents trying to load huge files which clearly aren't wallets)
-MAX_WALLET_FILE_SIZE = 64 * 2**20  # 64 MiB
-
-# Loads a wallet object and returns it (possibly for external libraries to use)
-def load_wallet(wallet_filename):
-    # Ask each registered wallet type if the file might be of their type,
-    # and if so load the wallet
-    uncertain_wallet_types = []
-    with open(wallet_filename, "rb") as wallet_file:
-        for wallet_type in wallet_types:
-            found = wallet_type.is_wallet_file(wallet_file)
-            if found:
-                wallet_file.close()
-                return wallet_type.load_from_filename(wallet_filename)
-            elif found is None:  # None means it might still be this type of wallet...
-                uncertain_wallet_types.append(wallet_type)
-
-    # If the wallet type couldn't be definitively determined, try each
-    # questionable type (which must raise ValueError on a load failure)
-    uncertain_errors = []
-    for wallet_type in uncertain_wallet_types:
-        try:
-            return wallet_type.load_from_filename(wallet_filename)
-        except ValueError as e:
-            uncertain_errors.append(wallet_type.__name__ + ": " + unicode(e))
-
-    error_exit("unrecognized wallet format" +
-        ("; heuristic parser(s) reported:\n    " + "\n    ".join(uncertain_errors) if uncertain_errors else "") )
-
-# Loads a wallet object into the loaded_wallet global from a filename
-def load_global_wallet(wallet_filename):
-    global loaded_wallet
-    loaded_wallet = load_wallet(wallet_filename)
-
-# Given a base64 string that was produced by one of the extract-* scripts, determines
-# the wallet type and sets the loaded_wallet global to a corresponding wallet object
-def load_from_base64_key(key_crc_base64):
-    global loaded_wallet
-
-    try:   key_crc_data = base64.b64decode(key_crc_base64)
-    except TypeError: error_exit("encrypted key data is corrupted (invalid base64)")
-
-    # Check the CRC
-    if len(key_crc_data) < 8:
-        error_exit("encrypted key data is corrupted (too short)")
-    key_data = key_crc_data[:-4]
-    (key_crc,) = struct.unpack(b"<I", key_crc_data[-4:])
-    if zlib.crc32(key_data) & 0xffffffff != key_crc:
-        error_exit("encrypted key data is corrupted (failed CRC check)")
-
-    wallet_type = wallet_types_by_id.get(key_data[:2])
-    if not wallet_type:
-        error_exit("unrecognized encrypted key type '"+key_data[:3]+"'")
-
-    loaded_wallet = wallet_type.load_from_data_extract(key_data[3:])
-    return key_crc
 
 
 # Load the OpenCL libraries and return a list of available devices
@@ -178,384 +127,10 @@ def prompt_unicode_password(prompt, error_msg):
         password = password.decode(encoding)  # convert from terminal's encoding to unicode
     return password
 
-
-############### Armory ###############
-
-# Try to add the Armory libraries to the path for various platforms
-is_armory_path_added = False
-def add_armory_library_path():
-    global is_armory_path_added
-    if is_armory_path_added: return
-    if sys.platform == "win32":
-        progfiles_path = os.environ.get("ProgramFiles",  r"C:\Program Files")  # default is for XP
-        armory_path    = progfiles_path + r"\Armory"
-        sys.path.extend((armory_path, armory_path + r"\library.zip"))
-        # 64-bit Armory might install into the 32-bit directory; if this is 64-bit Python look in both
-        if struct.calcsize(b"P") * 8 == 64:  # calcsize('P') is a pointer's size in bytes
-            assert not progfiles_path.endswith("(x86)"), "ProgramFiles doesn't end with '(x86)' on x64 Python"
-            progfiles_path += " (x86)"
-            armory_path     = progfiles_path + r"\Armory"
-            sys.path.extend((armory_path, armory_path + r"\library.zip"))
-    elif sys.platform.startswith("linux"):
-        sys.path.extend(("/usr/local/lib/armory", "/usr/lib/armory"))
-    elif sys.platform == "darwin":
-        import glob
-        sys.path.extend((
-            "/Applications/Armory.app/Contents/MacOS/py/usr/local/lib/armory",
-            "/Applications/Armory.app/Contents/MacOS/py/usr/lib/armory",
-            "/Applications/Armory.app/Contents/Frameworks/Python.framework/Versions/2.7/lib/python2.7/site-packages"))
-        sys.path.extend(glob.iglob(
-            "/Applications/Armory.app/Contents/Frameworks/Python.framework/Versions/2.7/lib/python2.7/site-packages/*.egg"))
-    is_armory_path_added = True
-
-is_armory_loaded = False
-def load_armory_library():
-    if mode.tstr == unicode:
-        error_exit("armory wallets do not support unicode; please remove the --utf8 option")
-    global is_armory_loaded
-    if is_armory_loaded: return
-
-    # Temporarily blank out argv before importing Armory, otherwise it attempts to process argv,
-    # and then add this one option to avoid a confusing warning message from Armory
-    old_argv = sys.argv[1:]
-    sys.argv[1:] = ["--language", "es"]
-
-    add_armory_library_path()
-    try:
-        # Try up to 10 times to load the first Armory library (there's a race
-        # condition on opening an Armory log file in Windows when multiprocessing)
-        import random
-        for i in xrange(10):
-            try:
-                from armoryengine.ArmoryUtils import getVersionInt, readVersionString, BTCARMORY_VERSION
-            except IOError as e:
-                if i<9 and e.filename.endswith(r"\armorylog.txt"):
-                    time.sleep(random.uniform(0.05, 0.15))
-                else: raise  # unexpected failure
-            except SystemExit:
-                if len(sys.argv) == 3:
-                    del sys.argv[1:]  # older versions of Armory don't support the --language option; remove it
-                else: raise  # unexpected failure
-            except ImportError as e:
-                if "not a valid Win32 application" in unicode(e):
-                    print(prog+": error: can't load Armory, 32/64 bit mismatch between it and Python", file=sys.stderr)
-                raise
-            else: break  # when it succeeds
-
-        # Fixed https://github.com/etotheipi/BitcoinArmory/issues/196
-        if getVersionInt(BTCARMORY_VERSION) < getVersionInt(readVersionString("0.92")):
-            error_exit("Armory version 0.92 or greater is required")
-
-        # These are the modules we actually need
-        global PyBtcWallet, PyBtcAddress, SecureBinaryData, KdfRomix
-        from armoryengine.PyBtcWallet import PyBtcWallet
-        from armoryengine.PyBtcWallet import PyBtcAddress
-        from CppBlockUtils import SecureBinaryData, KdfRomix
-        is_armory_loaded = True
-
-    finally:
-        sys.argv[1:] = old_argv  # restore the command line
-
-@register_wallet_class
-class WalletArmory(object):
-
-    class __metaclass__(type):
-        @property
-        def data_extract_id(cls): return b"ar"
-
-    @staticmethod
-    def passwords_per_seconds(seconds):
-        return max(int(round(4 * seconds)), 1)
-
-    @staticmethod
-    def is_wallet_file(wallet_file):
-        wallet_file.seek(0)
-        return wallet_file.read(8) == b"\xbaWALLET\x00"  # Armory magic
-
-    def __init__(self, loading = False):
-        assert loading, 'use load_from_* to create a ' + self.__class__.__name__
-        load_armory_library()
-
-    def __getstate__(self):
-        # Extract data from unpicklable Armory library objects and delete them
-        state = self.__dict__.copy()
-        del state["_address"], state["_kdf"]
-        state["addrStr20"]         = self._address.addrStr20
-        state["binPrivKey32_Encr"] = self._address.binPrivKey32_Encr.toBinStr()
-        state["binInitVect16"]     = self._address.binInitVect16.toBinStr()
-        state["binPublicKey65"]    = self._address.binPublicKey65.toBinStr()
-        state["memoryReqtBytes"]   = self._kdf.getMemoryReqtBytes()
-        state["numIterations"]     = self._kdf.getNumIterations()
-        state["salt"]              = self._kdf.getSalt().toBinStr()
-        return state
-
-    def __setstate__(self, state):
-        # Restore unpicklable Armory library objects
-        # global mode.tstr
-        try:
-            assert mode.tstr == str  # load_armory_library() requires this;
-        except NameError:       # but mode.tstr doesn't exist when using multiprocessing on Windows
-            mode.tstr = str          # so apply this workaround
-        load_armory_library()
-        #
-        state["_address"] = PyBtcAddress().createFromEncryptedKeyData(
-            state["addrStr20"],
-            SecureBinaryData(state["binPrivKey32_Encr"]),
-            SecureBinaryData(state["binInitVect16"]),
-            pubKey=state["binPublicKey65"]  # optional; makes checking slightly faster
-        )
-        del state["addrStr20"],     state["binPrivKey32_Encr"]
-        del state["binInitVect16"], state["binPublicKey65"]
-        #
-        state["_kdf"] = KdfRomix(
-            state["memoryReqtBytes"],
-            state["numIterations"],
-            SecureBinaryData(state["salt"])
-        )
-        del state["memoryReqtBytes"], state["numIterations"], state["salt"]
-        #
-        self.__dict__ = state
-
-    # Load the Armory wallet file
-    @classmethod
-    def load_from_filename(cls, wallet_filename):
-        self = cls(loading=True)
-        wallet = PyBtcWallet().readWalletFile(wallet_filename)
-        self._address = wallet.addrMap['ROOT']
-        self._kdf     = wallet.kdf
-        if not self._address.hasPrivKey():
-            error_exit("Armory wallet cannot be watching-only")
-        if not self._address.useEncryption :
-            error_exit("Armory wallet is not encrypted")
-        return self
-
-    # Import an Armory private key that was extracted by extract-armory-privkey.py
-    @classmethod
-    def load_from_data_extract(cls, privkey_data):
-        self = cls(loading=True)
-        self._address = PyBtcAddress().createFromEncryptedKeyData(
-            privkey_data[:20],                      # address (160 bit hash)
-            SecureBinaryData(privkey_data[20:52]),  # encrypted private key
-            SecureBinaryData(privkey_data[52:68])   # initialization vector
-        )
-        bytes_reqd, iter_count = struct.unpack(b"< I I", privkey_data[68:76])
-        self._kdf = KdfRomix(bytes_reqd, iter_count, SecureBinaryData(privkey_data[76:]))  # kdf args and seed
-        return self
-
-    def difficulty_info(self):
-        return "{:g} MiB, {} iterations + ECC".format(round(self._kdf.getMemoryReqtBytes() / 1024**2, 2), self._kdf.getNumIterations())
-
-    # Defer to either the cpu or OpenCL implementation
-    def return_verified_password_or_false(self, passwords):
-        return self._return_verified_password_or_false_opencl(passwords) if hasattr(self, "_cl_devices") \
-          else self._return_verified_password_or_false_cpu(passwords)
-
-    # This is the time-consuming function executed by worker thread(s). It returns a tuple: if a password
-    # is correct return it, else return False for item 0; return a count of passwords checked for item 1
-    def _return_verified_password_or_false_cpu(self, passwords):
-        for count, password in enumerate(passwords, 1):
-            if self._address.verifyEncryptionKey(self._kdf.DeriveKey(SecureBinaryData(password))):
-                return password, count
-        else:
-            return False, count
-
-    # Load and initialize the OpenCL kernel for Armory, given the global wallet and these params:
-    #   devices   - a list of one or more of the devices returned by config.get_opencl_devices()
-    #   global_ws - a list of global work sizes, exactly one per device
-    #   local_ws  - a list of local work sizes (or Nones), exactly one per device
-    #   int_rate  - number of times to interrupt calculations to prevent hanging
-    #               the GPU driver per call to return_verified_password_or_false()
-    #   save_every- how frequently hashes are saved in the lookup table
-    #   calc_memory-if true, just print the memory statistics and exit
-    def init_opencl_kernel(self, devices, global_ws, local_ws, int_rate, save_every = 1, calc_memory = False):
-        # Need to save these for return_verified_password_or_false_opencl()
-        assert devices, "WalletArmory.init_opencl_kernel: at least one device is selected"
-        assert len(devices) == len(global_ws) == len(local_ws), "WalletArmory.init_opencl_kernel: one global_ws and one local_ws specified for each device"
-        assert save_every > 0
-        self._cl_devices   = devices
-        self._cl_global_ws = global_ws
-        self._cl_local_ws  = local_ws
-
-        self._cl_V_buffer0s = self._cl_V_buffer1s = self._cl_V_buffer2s = self._cl_V_buffer3s = None  # clear any
-        self._cl_kernel = self._cl_kernel_fill = self._cl_queues = self._cl_hashes_buffers = None     # previously loaded
-        cl_context = pyopencl.Context(devices)
-        #
-        # Load and compile the OpenCL program, passing in defines for SAVE_EVERY, V_LEN, and SALT
-        assert  self._kdf.getMemoryReqtBytes() % 64 == 0
-        v_len = self._kdf.getMemoryReqtBytes() // 64
-        salt  = self._kdf.getSalt().toBinStr()
-        assert len(salt) == 32
-        with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "romix-ar-kernel.cl")) as opencl_file:
-            cl_program = pyopencl.Program(cl_context, opencl_file.read()).build(
-                b"-w -D SAVE_EVERY={}U -D V_LEN={}U -D SALT0=0x{:016x}UL -D SALT1=0x{:016x}UL -D SALT2=0x{:016x}UL -D SALT3=0x{:016x}UL" \
-                .format(save_every, v_len, *struct.unpack(b">4Q", salt)))
-        #
-        # Configure and store for later the OpenCL kernels (the entrance functions)
-        self._cl_kernel_fill = cl_program.kernel_fill_V    # this kernel is executed first
-        self._cl_kernel      = cl_program.kernel_lookup_V  # this kernel is executed once per iter_count
-        self._cl_kernel_fill.set_scalar_arg_dtypes([None, None, None, None, numpy.uint32, numpy.uint32, None, numpy.uint8])
-        self._cl_kernel     .set_scalar_arg_dtypes([None, None, None, None, numpy.uint32, None])
-        #
-        # Check the local_ws sizes
-        for i, device in enumerate(devices):
-            if local_ws[i] is None: continue
-            max_local_ws = min(self._cl_kernel_fill.get_work_group_info(pyopencl.kernel_work_group_info.WORK_GROUP_SIZE, device),
-                               self._cl_kernel     .get_work_group_info(pyopencl.kernel_work_group_info.WORK_GROUP_SIZE, device))
-            if local_ws[i] > max_local_ws:
-                error_exit("--local-ws of", local_ws[i], "exceeds max of", max_local_ws, "for GPU '"+device.name.strip()+"' with Armory wallets")
-
-        if calc_memory:
-            mem_per_worker = math.ceil(v_len / save_every) * 64 + 64
-            print(    "Details for this wallet")
-            print(    "  ROMix V-table length:  {:,}".format(v_len))
-            print(    "  outer iteration count: {:,}".format(self._kdf.getNumIterations()))
-            print(    "  with --mem-factor {},".format(save_every if save_every>1 else "1 (the default)"))
-            print(    "    memory per global worker: {:,} KiB\n".format(int(round(mem_per_worker / 1024))))
-            #
-            for i, device in enumerate(devices):
-                print("Details for", device.name.strip())
-                print("  global memory size:     {:,} MiB".format(int(round(device.global_mem_size / float(1024**2)))))
-                print("  with --mem-factor {},".format(save_every if save_every>1 else "1 (the default)"))
-                print("    est. max --global-ws: {}".format((int(device.global_mem_size // mem_per_worker) // 32 * 32)))
-                print("    with --global-ws {},".format(global_ws[i] if global_ws[i]!=4096 else "4096 (the default)"))
-                print("      est. memory usage:  {:,} MiB\n".format(int(round(global_ws[i] * mem_per_worker / float(1024**2)))))
-            sys.exit(0)
-
-        # Create one command queue, one I/O buffer, and four "V" buffers per device
-        self._cl_queues         = []
-        self._cl_hashes_buffers = []
-        self._cl_V_buffer0s     = []
-        self._cl_V_buffer1s     = []
-        self._cl_V_buffer2s     = []
-        self._cl_V_buffer3s     = []
-        for i, device in enumerate(devices):
-            self._cl_queues.append(pyopencl.CommandQueue(cl_context, device))
-            # Each I/O buffer is of len --global-ws * (size-of-sha512-hash-in-bytes == 512 bits / 8 == 64)
-            self._cl_hashes_buffers.append(pyopencl.Buffer(cl_context, pyopencl.mem_flags.READ_WRITE, global_ws[i] * 64))
-            #
-            # The "V" buffers total v_len * 64 * --global-ws bytes per device. There are four
-            # per device, so each is 1/4 of the total. They are reduced by a factor of save_every,
-            # rounded up to the nearest 64-byte boundry (the size-of-sha512-hash-in-bytes)
-            assert global_ws[i] % 4 == 0  # (kdf.getMemoryReqtBytes() is already checked to be divisible by 64)
-            V_buffer_len = int(math.ceil(v_len / save_every)) * 64 * global_ws[i] // 4
-            self._cl_V_buffer0s.append(pyopencl.Buffer(cl_context, pyopencl.mem_flags.READ_WRITE, V_buffer_len))
-            self._cl_V_buffer1s.append(pyopencl.Buffer(cl_context, pyopencl.mem_flags.READ_WRITE, V_buffer_len))
-            self._cl_V_buffer2s.append(pyopencl.Buffer(cl_context, pyopencl.mem_flags.READ_WRITE, V_buffer_len))
-            self._cl_V_buffer3s.append(pyopencl.Buffer(cl_context, pyopencl.mem_flags.READ_WRITE, V_buffer_len))
-
-        # Doing all the work at once will hang the GPU. One set of passwords requires iter_count
-        # calls to cl_kernel_fill and to cl_kernel. Divide 2xint_rate among these calls (2x is
-        # an arbitrary choice) and then calculate how much work (v_len_chunksize) to perform for
-        # each call rounding up to to maximize the work done in the last sets to optimize performance.
-        int_rate = int(round(int_rate / self._kdf.getNumIterations())) or 1  # there are two 2's which cancel out
-        self._v_len_chunksize = v_len // int_rate or 1
-        if self._v_len_chunksize % int_rate != 0:  # if not evenly divisible,
-            self._v_len_chunksize += 1             # then round up.
-        if self._v_len_chunksize % 2 != 0:         # also if not divisible by two,
-            self._v_len_chunksize += 1             # make it divisible by two.
-
-    def _return_verified_password_or_false_opencl(self, passwords):
-        assert len(passwords) <= sum(self._cl_global_ws), "WalletArmory.return_verified_password_or_false_opencl: at most --global-ws passwords"
-
-        # The first password hash is done by the CPU
-        salt = self._kdf.getSalt().toBinStr()
-        hashes = numpy.empty([sum(self._cl_global_ws), 64], numpy.uint8)
-        for i, password in enumerate(passwords):
-            hashes[i] = numpy.frombuffer(hashlib.sha512(password + salt).digest(), numpy.uint8)
-
-        # Divide up and copy the starting hashes into the OpenCL buffer(s) (one per device) in parallel
-        done   = []  # a list of OpenCL event objects
-        offset = 0
-        for devnum, ws in enumerate(self._cl_global_ws):
-            done.append(pyopencl.enqueue_copy(self._cl_queues[devnum], self._cl_hashes_buffers[devnum],
-                                              hashes[offset : offset + ws], is_blocking=False))
-            self._cl_queues[devnum].flush()  # Starts the copy operation
-            offset += ws
-        pyopencl.wait_for_events(done)
-
-        v_len = self._kdf.getMemoryReqtBytes() // 64
-        for i in xrange(self._kdf.getNumIterations()):
-
-            # Doing all the work at once will hang the GPU, so instead do v_len_chunksize chunks
-            # at a time, pausing briefly while waiting for them to complete, and then continuing.
-            # Because the work is probably not evenly divisible by v_len_chunksize, the loops below
-            # perform all but the last of these v_len_chunksize sets of work.
-
-            # The first set of kernel executions runs cl_kernel_fill which fills the "V" lookup table.
-
-            v_start = -self._v_len_chunksize  # used if the loop below doesn't run (when --int-rate == 1)
-            for v_start in xrange(0, v_len - self._v_len_chunksize, self._v_len_chunksize):
-                done = []  # a list of OpenCL event objects
-                # Start up a kernel for each device to do one chunk of v_len_chunksize work
-                for devnum in xrange(len(self._cl_devices)):
-                    done.append(self._cl_kernel_fill(
-                        self._cl_queues[devnum], (self._cl_global_ws[devnum],),
-                        None if self._cl_local_ws[devnum] is None else (self._cl_local_ws[devnum],),
-                        self._cl_V_buffer0s[devnum], self._cl_V_buffer1s[devnum], self._cl_V_buffer2s[devnum], self._cl_V_buffer3s[devnum],
-                        v_start, self._v_len_chunksize, self._cl_hashes_buffers[devnum], 0 == v_start == i))
-                    self._cl_queues[devnum].flush()  # Starts the kernel
-                pyopencl.wait_for_events(done)
-
-            # Perform the remaining work (usually less then v_len_chunksize)
-            done = []  # a list of OpenCL event objects
-            for devnum in xrange(len(self._cl_devices)):
-                done.append(self._cl_kernel_fill(
-                    self._cl_queues[devnum], (self._cl_global_ws[devnum],),
-                    None if self._cl_local_ws[devnum] is None else (self._cl_local_ws[devnum],),
-                    self._cl_V_buffer0s[devnum], self._cl_V_buffer1s[devnum], self._cl_V_buffer2s[devnum], self._cl_V_buffer3s[devnum],
-                    v_start + self._v_len_chunksize, v_len - self._v_len_chunksize - v_start, self._cl_hashes_buffers[devnum], v_start<0 and i==0))
-                self._cl_queues[devnum].flush()  # Starts the kernel
-            pyopencl.wait_for_events(done)
-
-            # The second set of kernel executions runs cl_kernel which uses the "V" lookup table to complete
-            # the hashes. This kernel runs with half the count of internal iterations as cl_kernel_fill.
-
-            assert self._v_len_chunksize % 2 == 0
-            v_start = -self._v_len_chunksize//2  # used if the loop below doesn't run (when --int-rate == 1)
-            for v_start in xrange(0, v_len//2 - self._v_len_chunksize//2, self._v_len_chunksize//2):
-                done = []  # a list of OpenCL event objects
-                # Start up a kernel for each device to do one chunk of v_len_chunksize work
-                for devnum in xrange(len(self._cl_devices)):
-                    done.append(self._cl_kernel(
-                        self._cl_queues[devnum], (self._cl_global_ws[devnum],),
-                        None if self._cl_local_ws[devnum] is None else (self._cl_local_ws[devnum],),
-                        self._cl_V_buffer0s[devnum], self._cl_V_buffer1s[devnum], self._cl_V_buffer2s[devnum], self._cl_V_buffer3s[devnum],
-                        self._v_len_chunksize//2, self._cl_hashes_buffers[devnum]))
-                    self._cl_queues[devnum].flush()  # Starts the kernel
-                pyopencl.wait_for_events(done)
-
-            # Perform the remaining work (usually less then v_len_chunksize)
-            done = []  # a list of OpenCL event objects
-            for devnum in xrange(len(self._cl_devices)):
-                done.append(self._cl_kernel(
-                    self._cl_queues[devnum], (self._cl_global_ws[devnum],),
-                    None if self._cl_local_ws[devnum] is None else (self._cl_local_ws[devnum],),
-                    self._cl_V_buffer0s[devnum], self._cl_V_buffer1s[devnum], self._cl_V_buffer2s[devnum], self._cl_V_buffer3s[devnum],
-                    v_len//2 - self._v_len_chunksize//2 - v_start, self._cl_hashes_buffers[devnum]))
-                self._cl_queues[devnum].flush()  # Starts the kernel
-            pyopencl.wait_for_events(done)
-
-        # Copy the resulting fully computed hashes back to RAM in parallel
-        done   = []  # a list of OpenCL event objects
-        offset = 0
-        for devnum, ws in enumerate(self._cl_global_ws):
-            done.append(pyopencl.enqueue_copy(self._cl_queues[devnum], hashes[offset : offset + ws],
-                                              self._cl_hashes_buffers[devnum], is_blocking=False))
-            offset += ws
-            self._cl_queues[devnum].flush()  # Starts the copy operation
-        pyopencl.wait_for_events(done)
-
-        # The first 32 bytes of each computed hash is the derived key. Use each to try to decrypt the private key.
-        for i, password in enumerate(passwords):
-            if self._address.verifyEncryptionKey(hashes[i,:32].tostring()):
-                return password, i + 1
-
-        return False, i + 1
-
-
 ############### Bitcoin Core ###############
 
-@register_wallet_class
+
+@Wallet.register_wallet_class
 class WalletBitcoinCore(object):
 
     class __metaclass__(type):
@@ -700,7 +275,7 @@ class WalletBitcoinCore(object):
         return False, count
 
     # Load and initialize the OpenCL kernel for Bitcoin Core, given:
-    #   devices - a list of one or more of the devices returned by config.get_opencl_devices()
+    #   devices - a list of one or more of the devices returned by get_opencl_devices()
     #   global_ws - a list of global work sizes, exactly one per device
     #   local_ws  - a list of local work sizes (or Nones), exactly one per device
     #   int_rate  - number of times to interrupt calculations to prevent hanging
@@ -815,7 +390,7 @@ class WalletBitcoinCore(object):
         return False, i + 1
 
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletPywallet(WalletBitcoinCore):
 
     class __metaclass__(WalletBitcoinCore.__metaclass__):
@@ -891,7 +466,7 @@ class WalletPywallet(WalletBitcoinCore):
 # - Bitcoin Wallet for Android/BlackBerry v2.3 - v3.46 key backup files
 # - KnC for Android key backup files (same as the above)
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletMultiBit(object):
 
     class __metaclass__(type):
@@ -1018,7 +593,7 @@ class WalletMultiBit(object):
 # (it's a global so that it's pickleable)
 EncryptionParams = collections.namedtuple("EncryptionParams", "salt n r p")
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletBitcoinj(object):
 
     class __metaclass__(type):
@@ -1060,7 +635,6 @@ class WalletBitcoinj(object):
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
         global pylibscrypt
-        import pylibscrypt
         load_aes256_library(warnings=False)
         self.__dict__ = state
 
@@ -1068,7 +642,7 @@ class WalletBitcoinj(object):
     @classmethod
     def load_from_filename(cls, wallet_filename):
         with open(wallet_filename, "rb") as wallet_file:
-            filedata = wallet_file.read(MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
+            filedata = wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
         return cls._load_from_filedata(filedata)
 
     @classmethod
@@ -1142,7 +716,7 @@ class WalletBitcoinj(object):
 
 ############### MultiBit HD ###############
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletMultiBitHD(WalletBitcoinj):
 
     class __metaclass__(WalletBitcoinj.__metaclass__):
@@ -1238,7 +812,7 @@ class WalletAndroidSpendingPIN(WalletBitcoinj):
                 return WalletBitcoinj.load_from_filename(wallet_filename)
 
             wallet_file.seek(0)
-            data = wallet_file.read(MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
+            data = wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
 
         data = data.replace(b"\r", b"").replace(b"\n", b"")
         data = base64.b64decode(data)
@@ -1278,7 +852,7 @@ class WalletAndroidSpendingPIN(WalletBitcoinj):
 
 ############### mSIGNA ###############
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletMsigna(object):
 
     class __metaclass__(type):
@@ -1423,7 +997,7 @@ class WalletElectrum(object):
     def difficulty_info(self):
         return "2 SHA-256 iterations"
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletElectrum1(WalletElectrum):
 
     class __metaclass__(type):
@@ -1442,7 +1016,7 @@ class WalletElectrum1(WalletElectrum):
         from ast import literal_eval
         with open(wallet_filename) as wallet_file:
             try:
-                wallet = literal_eval(wallet_file.read(MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
+                wallet = literal_eval(wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
             except SyntaxError as e:  # translate any SyntaxError into a
                 raise ValueError(e)   # ValueError as expected by config.load_wallet()
         return cls._load_from_dict(wallet)
@@ -1485,7 +1059,7 @@ class WalletElectrum1(WalletElectrum):
 
         return False, count
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletElectrum2(WalletElectrum):
 
     class __metaclass__(type):
@@ -1628,7 +1202,7 @@ class WalletElectrum2(WalletElectrum):
 
         return False, count
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletElectrumLooseKey(WalletElectrum):
 
     class __metaclass__(type):
@@ -1668,7 +1242,7 @@ class WalletElectrumLooseKey(WalletElectrum):
         return False, count
 
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletElectrum28(object):
 
     def passwords_per_seconds(self, seconds):
@@ -1684,7 +1258,6 @@ class WalletElectrum28(object):
     def __init__(self, loading = False):
         assert loading, 'use load_from_* to create a ' + self.__class__.__name__
         global hmac, coincurve
-        import hmac, coincurve
         pbkdf2_library_name    = load_pbkdf2_library().__name__
         self._aes_library_name = load_aes256_library().__name__
         self._passwords_per_second = 800 if pbkdf2_library_name == "hashlib" else 140
@@ -1698,7 +1271,7 @@ class WalletElectrum28(object):
     def __setstate__(self, state):
         # Restore coincurve.PublicKey object and (re-)load the required libraries
         global hmac, coincurve
-        import hmac, coincurve
+        import coincurve
         load_pbkdf2_library(warnings=False)
         load_aes256_library(warnings=False)
         self.__dict__ = state
@@ -1708,8 +1281,8 @@ class WalletElectrum28(object):
     @classmethod
     def load_from_filename(cls, wallet_filename):
         with open(wallet_filename) as wallet_file:
-            data = wallet_file.read(MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
-        if len(data) >= MAX_WALLET_FILE_SIZE:
+            data = wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
+        if len(data) >= Wallet.MAX_WALLET_FILE_SIZE:
             raise ValueError("Encrypted Electrum wallet file is too big")
         MIN_LEN = 37 + 32 + 32  # header + ciphertext + trailer
         if len(data) < MIN_LEN * 4 / 3:
@@ -1771,7 +1344,7 @@ class WalletElectrum28(object):
 
 ############### Blockchain ###############
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletBlockchain(object):
 
     class __metaclass__(type):
@@ -1806,7 +1379,7 @@ class WalletBlockchain(object):
     @classmethod
     def load_from_filename(cls, wallet_filename):
         with open(wallet_filename) as wallet_file:
-            data, iter_count = cls._parse_encrypted_blockchain_wallet(wallet_file.read(MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
+            data, iter_count = cls._parse_encrypted_blockchain_wallet(wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE))  # up to 64M, typical size is a few k
         self = cls(iter_count, loading=True)
         self._salt_and_iv     = data[:16]    # only need the salt_and_iv plus
         self._encrypted_block = data[16:32]  # the first 16-byte encrypted block
@@ -1919,7 +1492,7 @@ class WalletBlockchain(object):
 
         return False, count
 
-@register_wallet_class
+@Wallet.register_wallet_class
 class WalletBlockchainSecondpass(WalletBlockchain):
 
     class __metaclass__(WalletBlockchain.__metaclass__):
@@ -1936,7 +1509,7 @@ class WalletBlockchainSecondpass(WalletBlockchain):
         from uuid import UUID
 
         with open(wallet_filename) as wallet_file:
-            data = wallet_file.read(MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
+            data = wallet_file.read(Wallet.MAX_WALLET_FILE_SIZE)  # up to 64M, typical size is a few k
 
         try:
             # Assuming the wallet is encrypted, get the encrypted data
@@ -2067,7 +1640,8 @@ class WalletBlockchainSecondpass(WalletBlockchain):
 
 ############### Bither ###############
 
-@register_wallet_class
+
+@Wallet.register_wallet_class
 class WalletBither(object):
 
     class __metaclass__(type):
@@ -2090,7 +1664,6 @@ class WalletBither(object):
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
         global pylibscrypt, coincurve
-        import pylibscrypt, coincurve
         load_aes256_library(warnings=False)
         self.__dict__ = state
 
@@ -2251,8 +1824,6 @@ class WalletBIP39(object):
             error_exit("--wallet-type must be one of: bitcoin, ethereum")
 
         global normalize, hmac
-        from unicodedata import normalize
-        import hmac
         load_pbkdf2_library()
 
         # Create a btcrseed.WalletBIP39 object which will do most of the work;
@@ -2282,8 +1853,6 @@ class WalletBIP39(object):
     def __setstate__(self, state):
         # (re-)load the required libraries after being unpickled
         global normalize, hmac
-        from unicodedata import normalize
-        import hmac
         load_pbkdf2_library(warnings=False)
         self.__dict__ = state
 
@@ -2912,7 +2481,7 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         error_exit("--performance cannot be used with --tokenlist or --passwordlist")
 
     if args.list_gpus:
-        devices_avail = config.get_opencl_devices()  # all available OpenCL device objects
+        devices_avail = get_opencl_devices()  # all available OpenCL device objects
         if not devices_avail:
             error_exit("no supported GPUs found")
         for i, dev in enumerate(devices_avail, 1):
@@ -3268,26 +2837,25 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         error_exit("argument --wallet (or --data-extract, --bip39, or --listpass, exactly one) is required")
 
     # If specificed, use a custom wallet object instead of loading a wallet file or data-extract
-    global loaded_wallet
     if wallet:
-        loaded_wallet = wallet
+        Wallet.set_loaded_wallet(wallet)
 
     # Load the wallet file (this sets the loaded_wallet global)
     if args.wallet:
         if args.android_pin:
-            loaded_wallet = WalletAndroidSpendingPIN.load_from_filename(args.wallet)
+            Wallet.set_loaded_wallet(WalletAndroidSpendingPIN.load_from_filename(args.wallet))
         elif args.blockchain_secondpass:
-            loaded_wallet = WalletBlockchainSecondpass.load_from_filename(args.wallet)
+            Wallet.set_loaded_wallet(WalletBlockchainSecondpass.load_from_filename(args.wallet))
         elif args.wallet == "__null":
-            loaded_wallet = WalletNull()
+            Wallet.set_loaded_wallet(WalletNull())
         else:
             config.load_global_wallet(args.wallet)
-            if type(loaded_wallet) is WalletBitcoinj:
+            if type(Wallet.get_loaded_wallet()) is WalletBitcoinj:
                 print(prog+": notice: for MultiBit, use a .key file instead of a .wallet file if possible")
-            if isinstance(loaded_wallet, WalletMultiBit) and not args.android_pin:
+            if isinstance(Wallet.get_loaded_wallet(), WalletMultiBit) and not args.android_pin:
                 print(prog+": notice: use --android-pin to recover the spending PIN of\n"
                            "    a Bitcoin Wallet for Android/BlackBerry backup (instead of the backup password)")
-        if args.msigna_keychain and not isinstance(loaded_wallet, WalletMsigna):
+        if args.msigna_keychain and not isinstance(Wallet.get_loaded_wallet(), WalletMsigna):
             print(prog+": warning: ignoring --msigna-keychain (wallet file is not an mSIGNA vault)")
 
 
@@ -3310,13 +2878,13 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         #
         # Emulates config.load_global_wallet(), but using the base64 key data instead of a wallet
         # file (this sets the loaded_wallet global, and returns the validated CRC)
-        key_crc = load_from_base64_key(key_crc_base64)
+        key_crc = Wallet.load_from_base64_key(key_crc_base64)
         #
         # Armory's extract script provides an encrypted full private key (but not the master private key nor the chaincode)
-        if isinstance(loaded_wallet, WalletArmory):
+        if isinstance(Wallet.get_loaded_wallet(), WalletArmory):
             print("WARNING: an Armory private key, once decrypted, provides access to that key's Bitcoin", file=sys.stderr)
         #
-        if isinstance(loaded_wallet, WalletMsigna):
+        if isinstance(Wallet.get_loaded_wallet(), WalletMsigna):
             if args.msigna_keychain:
                 print(prog+": warning: ignoring --msigna-keychain (the extract script has already chosen the keychain)")
         elif args.msigna_keychain:
@@ -3347,17 +2915,17 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
             mnemonic = None
 
         args.wallet_type = args.wallet_type.strip().lower() if args.wallet_type else "bitcoin"
-        loaded_wallet = WalletBIP39(args.mpk, args.addrs, args.addr_limit, args.addressdb, mnemonic,
-                                    args.language, args.bip32_path, args.wallet_type, args.performance)
+        Wallet.set_loaded_wallet(WalletBIP39(args.mpk, args.addrs, args.addr_limit, args.addressdb, mnemonic,
+                                    args.language, args.bip32_path, args.wallet_type, args.performance))
 
 
     # Parse and syntax check all of the GPU related options
     if args.enable_gpu or args.calc_memory:
-        if not hasattr(loaded_wallet, "init_opencl_kernel"):
-            error_exit(loaded_wallet.__class__.__name__ + " does not support GPU acceleration")
-        if isinstance(loaded_wallet, WalletBitcoinCore) and args.calc_memory:
+        if not hasattr(Wallet.get_loaded_wallet(), "init_opencl_kernel"):
+            error_exit(Wallet.get_loaded_wallet().__class__.__name__ + " does not support GPU acceleration")
+        if isinstance(Wallet.get_loaded_wallet(), WalletBitcoinCore) and args.calc_memory:
             error_exit("--calc-memory is not supported for Bitcoin Core wallets")
-        devices_avail = config.get_opencl_devices()  # all available OpenCL device objects
+        devices_avail = get_opencl_devices()  # all available OpenCL device objects
         if not devices_avail:
             error_exit("no supported GPUs found")
         if args.int_rate <= 0:
@@ -3428,21 +2996,21 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
         for ws in args.global_ws:
             if ws < 1:
                 error_exit("each --global-ws must be a postive integer")
-            if isinstance(loaded_wallet, WalletArmory) and ws % 4 != 0:
+            if isinstance(Wallet.get_loaded_wallet(), WalletArmory) and ws % 4 != 0:
                 error_exit("each --global-ws must be divisible by 4 for Armory wallets")
             if ws % 32 != 0:
                 print(prog+": warning: each --global-ws should probably be divisible by 32 for good performance", file=sys.stderr)
                 break
         #
         extra_opencl_args = ()
-        if isinstance(loaded_wallet, WalletBitcoinCore):
+        if isinstance(Wallet.get_loaded_wallet(), WalletBitcoinCore):
             if args.mem_factor != 1:
                 print(prog+": warning: --mem-factor is ignored for Bitcoin Core wallets", file=sys.stderr)
-        elif isinstance(loaded_wallet, WalletArmory):
+        elif isinstance(Wallet.get_loaded_wallet(), WalletArmory):
             if args.mem_factor < 1:
                 error_exit("--mem-factor must be >= 1")
             extra_opencl_args = args.mem_factor, args.calc_memory
-        loaded_wallet.init_opencl_kernel(devices, args.global_ws, args.local_ws, args.int_rate, *extra_opencl_args)
+        Wallet.get_loaded_wallet().init_opencl_kernel(devices, args.global_ws, args.local_ws, args.int_rate, *extra_opencl_args)
         if args.threads != parser.get_default("threads"):
             print(prog+": warning: --threads is ignored with --enable-gpu", file=sys.stderr)
         args.threads = 1
@@ -4214,7 +3782,7 @@ def tokenlist_base_password_generator():
         # respect to each other. Below, build a tokens_combination_nopos list from
         # tokens_combination with all positional anchors removed. They will be inserted
         # back into the correct position later. Also search for invalid anchors of any
-        # type: a positional anchor placed past the end of the current combination (based
+        # type\: a positional anchor placed past the end of the current combination (based
         # on its length) or a middle anchor whose begin position is past *or at* the end.
         positional_anchors  = None  # (will contain strings, not AnchoredToken's)
         has_any_mid_anchors = False
@@ -4971,17 +4539,16 @@ def insert_typos_generator(password_base, min_typos = 0):
 # Simply forwards calls on to the return_verified_password_or_false()
 # member function of the currently loaded global wallet
 def return_verified_password_or_false(passwords):
-    return loaded_wallet.return_verified_password_or_false(passwords)
+    return Wallet.get_loaded_wallet().return_verified_password_or_false(passwords)
 
 # Init function for the password verifying worker processes:
 #   (re-)loads the wallet & mode (should only be necessary on Windows),
 #   tries to set the process priority to minimum, and
 #   begins ignoring SIGINTs for a more graceful exit on Ctrl-C
-loaded_wallet = None  # initialized once at global scope for Windows
+# loaded_wallet = None  # initialized once at global scope for Windows
 def init_worker(wallet, char_mode):
-    global loaded_wallet
-    if not loaded_wallet:
-        loaded_wallet = wallet
+    if not Wallet.get_loaded_wallet():
+        Wallet.set_loaded_wallet(wallet)
         if char_mode == str:
             mode.enable_ascii_mode()
         elif char_mode == unicode:
@@ -5242,7 +4809,7 @@ def main():
         return None, unicode(passwords_count) + " password combinations" + plus_skipped
 
     try:
-        print("Wallet difficulty:", loaded_wallet.difficulty_info())
+        print("Wallet difficulty:", Wallet.get_loaded_wallet().difficulty_info())
     except AttributeError: pass
 
     # Measure the performance of the verification function
@@ -5257,7 +4824,7 @@ def main():
             # Passwords are verified in "chunks" to reduce call overhead. One chunk includes enough passwords to
             # last for about 1/100th of a second (determined experimentally to be about the best I could do, YMMV)
             CHUNKSIZE_SECONDS = 1.0 / 100.0
-            measure_performance_iterations = loaded_wallet.passwords_per_seconds(0.5)
+            measure_performance_iterations = Wallet.get_loaded_wallet().passwords_per_seconds(0.5)
             inner_iterations = int(round(2*measure_performance_iterations * CHUNKSIZE_SECONDS)) or 1  # the "2*" is due to the 0.5 seconds above
             outer_iterations = int(round(measure_performance_iterations / inner_iterations))
             assert outer_iterations > 0
@@ -5266,7 +4833,7 @@ def main():
         start = timeit.default_timer()
         # Emulate calling the verification function with lists of size inner_iterations
         for o in xrange(outer_iterations):
-            loaded_wallet.return_verified_password_or_false(list(
+            Wallet.get_loaded_wallet().return_verified_password_or_false(list(
                 itertools.islice(itertools.ifilter(custom_final_checker, performance_generator), inner_iterations)))
         est_secs_per_password = (timeit.default_timer() - start) / (outer_iterations * inner_iterations)
         del performance_generator
@@ -5346,7 +4913,7 @@ def main():
     assert skipped_count == args.skip
 
     if args.enable_gpu:
-        cl_devices = loaded_wallet._cl_devices
+        cl_devices = Wallet.get_loaded_wallet()._cl_devices
         if len(cl_devices) == 1:
             print("Using OpenCL", pyopencl.device_type.to_string(cl_devices[0].type), cl_devices[0].name.strip())
         else:
@@ -5401,7 +4968,7 @@ def main():
         password_found_iterator = itertools.imap(return_verified_password_or_false, password_iterator)
         set_process_priority_idle()  # this, the only thread, should be nice
     else:
-        pool = multiprocessing.Pool(spawned_threads, init_worker, (loaded_wallet, mode.tstr))
+        pool = multiprocessing.Pool(spawned_threads, init_worker, (Wallet.get_loaded_wallet(), mode.tstr))
         password_found_iterator = pool.imap(return_verified_password_or_false, password_iterator)
         if main_thread_is_worker: set_process_priority_idle()  # if this thread is cpu-intensive, be nice
 
