@@ -14,6 +14,9 @@ from btcrecover.modules.utilities.safe_print import error_exit
 from btcrecover.modules.wallets.wallet import Wallet
 
 
+print("armory init")
+
+
 @Wallet.register_wallet_class
 class WalletArmory(object):
     program_name = os.path.basename(sys.argv[0])

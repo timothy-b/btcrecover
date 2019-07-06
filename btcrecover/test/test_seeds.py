@@ -29,11 +29,24 @@
 # (all optional futures for 2.7 except unicode_literals)
 from __future__ import print_function, absolute_import, division
 
-import warnings, unittest, os, tempfile, shutil, filecmp, sys, hashlib, random, mmap, pickle
+import filecmp
+import hashlib
+import mmap
+import os
+import pickle
+import random
+import shutil
+import sys
+import tempfile
+import unittest
+import warnings
+
+from btcrecover import btcrseed
+from btcrecover.addressset import AddressSet
+from btcrecover.modules.wallets.wallet import Wallet
+
 if __name__ == b'__main__':
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-from btcrecover import btcrseed, Wallet
-from btcrecover.addressset import AddressSet
 
 wallet_dir = os.path.join(os.path.dirname(__file__), "test-wallets")
 

@@ -30,7 +30,8 @@ class Wallet:
         cls.wallet_types.append(to_register)
         try:
             assert to_register.data_extract_id not in cls.wallet_types_by_id,\
-                "register_wallet_class: registered wallet types must have unique data_extract_id's"
+                "register_wallet_class: registered wallet types must have unique data_extract_id's. Invalid Id: "\
+                + str(to_register.data_extract_id)
             cls.wallet_types_by_id[to_register.data_extract_id] = to_register
         except AttributeError:
             pass
@@ -44,7 +45,7 @@ class Wallet:
 
     # Loads a wallet object and returns it (possibly for external libraries to use)
     @classmethod
-    def load_wallet(cls, wallet_filename):
+    def load_wallet(cls, wallet_filename, settings=None):
         # Ask each registered wallet type if the file might be of their type,
         # and if so load the wallet
         uncertain_wallet_types = []
@@ -53,7 +54,7 @@ class Wallet:
                 found = wallet_type.is_wallet_file(wallet_file)
                 if found:
                     wallet_file.close()
-                    return wallet_type.load_from_filename(wallet_filename)
+                    return wallet_type.load_from_filename(wallet_filename, settings)
                 elif found is None:  # None means it might still be this type of wallet...
                     uncertain_wallet_types.append(wallet_type)
 
@@ -71,8 +72,8 @@ class Wallet:
 
     # Loads a wallet object into the loaded_wallet global from a filename
     @classmethod
-    def load_global_wallet(cls, wallet_filename):
-        cls.loaded_wallet = Wallet.load_wallet(wallet_filename)
+    def load_global_wallet(cls, wallet_filename, settings=None):
+        cls.loaded_wallet = Wallet.load_wallet(wallet_filename, settings)
 
     # Given a base64 string that was produced by one of the extract-* scripts, determines
     # the wallet type and sets the loaded_wallet global to a corresponding wallet object

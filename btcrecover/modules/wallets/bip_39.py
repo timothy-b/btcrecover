@@ -1,7 +1,10 @@
 import hashlib
 import itertools
 
-from btcrecover import btcrseed, CryptoUtil
+# TODO: fix circular dependency
+#from btcrecover.btcrseed import WalletBIP39 as BtcrseedWalletBIP39
+#from btcrecover.btcrseed import WalletEthereum as BtrseedWalletEthereum
+from btcrecover.modules.utilities.crypto_util import CryptoUtil
 from btcrecover.modules import mode
 from btcrecover.modules.utilities.safe_print import error_exit
 
@@ -13,11 +16,11 @@ class WalletBIP39(object):
                  mnemonic=None, lang=None, path=None, wallet_type="bitcoin", is_performance=False):
 
         if wallet_type == "bitcoin":
-            btcrseed_cls = btcrseed.WalletBIP39
+            btcrseed_cls = BtcrseedWalletBIP39
         elif wallet_type == "ethereum":
             if addressdb_filename:
                 error_exit("can't use an address database with Ethereum wallets")
-            btcrseed_cls = btcrseed.WalletEthereum
+            btcrseed_cls = BtrseedWalletEthereum
         else:
             error_exit("--wallet-type must be one of: bitcoin, ethereum")
 

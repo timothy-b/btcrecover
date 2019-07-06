@@ -11,6 +11,7 @@ simple_typos = simple_typo_args = None
 typos_map = None
 typos_replace_expanded = []
 
+
 # Recognized wildcard (e.g. %d, %a) types mapped to their associated sets
 # of characters; used in expand_wildcards_generator()
 # warning: these can't be the key for a wildcard set: digits 'i' 'b' '[' ',' ';' '-' '<' '>'
@@ -57,6 +58,7 @@ def init_wildcards():
     backreference_maps      = dict()
     backreference_maps_sha1 = None
 
+
 # Simple typo generators produce (as an iterable, e.g. a tuple, generator, etc.)
 # zero or more alternative typo strings which can replace a single character. If
 # more than one string is produced, all combinations are tried. If zero strings are
@@ -70,7 +72,8 @@ def typo_delete(p, i): return mode.tstr(""),  # A single replacement of len 0.
 def typo_case(p, i):                     # Returns a single replacement or no
     swapped = p[i].swapcase()            # replacement if it's a caseless char.
     return (swapped,) if swapped != p[i] else ()
-#
+
+
 def typo_closecase(p, i):  #  Returns a swapped case only when case transitions are nearby
     cur_case_id = case_id_of(p[i])  # (case_id functions defined in the Password Generation section)
     if cur_case_id == UNCASED_ID: return ()
@@ -79,7 +82,8 @@ def typo_closecase(p, i):  #  Returns a swapped case only when case transitions 
             case_id_changed(case_id_of(p[i+1]), cur_case_id):
         return p[i].swapcase(),
     return ()
-#
+
+
 def typo_replace_wildcard(p, i): return [e for e in typos_replace_expanded if e != p[i]]
 def typo_map(p, i):              return typos_map.get(p[i], ())
 # (typos_replace_expanded and typos_map are initialized from args.typos_replace
@@ -96,7 +100,8 @@ simple_typos["case"]      = typo_case
 simple_typos["closecase"] = typo_closecase
 simple_typos["replace"]   = typo_replace_wildcard
 simple_typos["map"]       = typo_map
-#
+
+
 # a dict: typo name (matches typo names in the dict above) mapped to the options
 # that are passed to add_argument; this dict is only ordered for cosmetic reasons
 simple_typo_args = collections.OrderedDict()
@@ -107,6 +112,7 @@ simple_typo_args["closecase"] = dict( action="store_true",       help="like --ty
 simple_typo_args["map"]       = dict( metavar="FILE",            help="replace specific characters based on a map file" )
 simple_typo_args["replace"]   = dict( metavar="WILDCARD-STRING", help="replace a character with another string or wildcard" )
 
+
 # Convenience functions currently only used by config.typo_closecase()
 #
 UNCASED_ID   = 0
@@ -116,7 +122,8 @@ def case_id_of(letter):
     if   letter.islower(): return LOWERCASE_ID
     elif letter.isupper(): return UPPERCASE_ID
     else:                  return UNCASED_ID
-#
+
+
 # Note that  in order for a case to be considered changed, one of the two letters must be
 # uppercase (i.e. lowercase to uncased isn't a case change, but uppercase to uncased is a
 # case change, and of course lowercase to uppercase is too)
