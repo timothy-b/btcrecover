@@ -31,12 +31,17 @@ from __future__ import print_function, absolute_import, division, unicode_litera
 
 import warnings, os, unittest, cPickle, tempfile, shutil, multiprocessing, gc, filecmp, sys, hashlib
 
-from btcrecover.modules.wallets.bip_39 import WalletBIP39
+from btcrecover.btrcpass.wallets.armory import WalletArmory
+from btcrecover.btrcpass.wallets.android_spending_pin import WalletAndroidSpendingPIN
+#from btcrecover.btrcpass.wallets.bip_39 import WalletBIP39
+from btcrecover.btrcpass.wallets.blockchain import WalletBlockchain
+from btcrecover.utilities.crypto_util import CryptoUtil
 
 if __name__ == b'__main__':
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from btcrecover import btcrpass, Wallet, WalletArmory, CryptoUtil
+from btcrecover.btrcpass.wallets.wallet import Wallet
+from btcrecover.btrcpass import btcrpass
 
 
 class NonClosingBase(object):
@@ -210,7 +215,7 @@ class Test01Basics(GeneratorTester):
         self.assertRaises(StopIteration, tok_it.next)
 
     def test_only_yield_count(self):
-        btcrpass.parse_arguments(("--tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("one two three four five six")))
         tok_it = btcrpass.password_generator(2, only_yield_count=True)
         self.assertEqual(tok_it.next(), 2)
@@ -220,7 +225,7 @@ class Test01Basics(GeneratorTester):
         self.assertEqual(tok_it.next(), ["six"])
         self.assertRaises(StopIteration, tok_it.next)
 
-        btcrpass.parse_arguments(("--passwordlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--passwordlist __funccall --listpass" + utf8_opt).split(),
                                  passwordlist = StringIO(tstr("one two three four five six".replace(" ", "\n"))))
         pwl_it = btcrpass.password_generator(2, only_yield_count=True)
         self.assertEqual(pwl_it.next(), 2)
@@ -231,35 +236,35 @@ class Test01Basics(GeneratorTester):
         self.assertRaises(StopIteration, pwl_it.next)
 
     def test_only_yield_count_all(self):
-        btcrpass.parse_arguments(("--tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("one two three")))
         tok_it = btcrpass.password_generator(4, only_yield_count=True)
         self.assertEqual(tok_it.next(), 3)
         self.assertRaises(StopIteration, tok_it.next)
 
-        btcrpass.parse_arguments(("--passwordlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--passwordlist __funccall --listpass" + utf8_opt).split(),
                                  passwordlist = StringIO(tstr("one two three".replace(" ", "\n"))))
         pwl_it = btcrpass.password_generator(4, only_yield_count=True)
         self.assertEqual(pwl_it.next(), 3)
         self.assertRaises(StopIteration, pwl_it.next)
 
     def test_count(self):
-        btcrpass.parse_arguments(("--tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("one two three")))
         self.assertEqual(btcrpass.count_and_check_eta(1.0), 3)
     def test_count_zero(self):
-        btcrpass.parse_arguments(("--tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("")))
         self.assertEqual(btcrpass.count_and_check_eta(1.0), 0)
     # the size of a "chunk" is == btcrpass.PASSWORDS_BETWEEN_UPDATES == 100000
     def test_count_one_chunk(self):
         assert btcrpass.PASSWORDS_BETWEEN_UPDATES == 100000
-        btcrpass.parse_arguments(("--tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("%5d")))
         self.assertEqual(btcrpass.count_and_check_eta(1.0), 100000)
     def test_count_two_chunks(self):
         assert btcrpass.PASSWORDS_BETWEEN_UPDATES == 100000
-        btcrpass.parse_arguments(("--tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("%5d 100000")))
         self.assertEqual(btcrpass.count_and_check_eta(1.0), 100001)
 
@@ -670,7 +675,7 @@ class Test05CommandLine(GeneratorTester):
         self.do_generator_test(["да"], ["да", "вда", "два", "дав"], "--typos-insert в")
 
     def test_passwordlist_no_wildcards(self):
-        btcrpass.parse_arguments(("--passwordlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--passwordlist __funccall --listpass" + utf8_opt).split(),
                                  passwordlist = StringIO(tstr("%%")))
         tok_it, skipped = btcrpass.password_generator_factory(2)
         self.assertEqual(tok_it.next(), ["%%"])
@@ -727,40 +732,40 @@ class Test05CommandLine(GeneratorTester):
                                "-d --skip " + unicode(self.LARGE_TOKENLIST_LEN + 2),
                                False, sys.maxint, self.LARGE_TOKENLIST_LEN + 1)
     def test_skip_end2end(self):
-        btcrpass.parse_arguments(("--skip 2 --tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--skip 2 --tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("one \n two")))
         self.assertIn("2 password combinations (plus 2 skipped)", btcrpass.main()[1])
     def test_skip_end2end_all_exact(self):
-        btcrpass.parse_arguments(("--skip 4 --tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--skip 4 --tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("one \n two")))
         self.assertIn("0 password combinations (plus 4 skipped)", btcrpass.main()[1])
     def test_skip_end2end_all_pastend(self):
-        btcrpass.parse_arguments(("--skip 5 --tokenlist __funccall --listpass"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--skip 5 --tokenlist __funccall --listpass" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("one \n two")))
         self.assertIn("0 password combinations (plus 4 skipped)", btcrpass.main()[1])
     def test_skip_end2end_all_noeta(self):
-        btcrpass.parse_arguments(("--skip 5 --tokenlist __funccall --no-eta --wallet __null"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--skip 5 --tokenlist __funccall --no-eta --wallet __null" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("one \n two")))
         self.assertIn("Skipped all 4 passwords", btcrpass.main()[1])
 
     def test_max_eta(self):
-        btcrpass.parse_arguments(("--max-eta 1 --tokenlist __funccall --wallet __null"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--max-eta 1 --tokenlist __funccall --wallet __null" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("1 2 3 4 5 6 7 8 9 10 11")))
         with self.assertRaises(SystemExit) as cm:
             btcrpass.count_and_check_eta(360.0)  # 360s * 11 passwords > 1 hour
         self.assertIn("at least 11 passwords to try, ETA > --max-eta option (1 hours)", cm.exception.code)
     def test_max_eta_ok(self):
-        btcrpass.parse_arguments(("--max-eta 1 --tokenlist __funccall --wallet __null"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--max-eta 1 --tokenlist __funccall --wallet __null" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("1 2 3 4 5 6 7 8 9 10")))
         self.assertEqual(btcrpass.count_and_check_eta(360.0), 10)  # 360s * 10 passwords <= 1 hour
     def test_max_eta_skip(self):
-        btcrpass.parse_arguments(("--max-eta 1 --skip 4 --tokenlist __funccall --wallet __null"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--max-eta 1 --skip 4 --tokenlist __funccall --wallet __null" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("1 2 3 4 5 6 7 8 9 10 11 12 13 14 15")))
         with self.assertRaises(SystemExit) as cm:
             btcrpass.count_and_check_eta(360.0)  # 360s * 11 passwords > 1 hour
         self.assertIn("at least 11 passwords to try, ETA > --max-eta option (1 hours)", cm.exception.code)
     def test_max_eta_skip_ok(self):
-        btcrpass.parse_arguments(("--max-eta 1 --skip 5 --tokenlist __funccall --wallet __null"+utf8_opt).split(),
+        btcrpass.parse_arguments(("--max-eta 1 --skip 5 --tokenlist __funccall --wallet __null" + utf8_opt).split(),
                                  tokenlist = StringIO(tstr("1 2 3 4 5 6 7 8 9 10 11 12 13 14 15")))
         # 360s * 10 passwords <= 1 hour, but count_and_check_eta still returns the total count of 15
         self.assertEqual(btcrpass.count_and_check_eta(360.0), 15)
@@ -948,7 +953,6 @@ def can_load_protobuf():
     global is_protobuf_loadable
     if is_protobuf_loadable is None:
         try:
-            from .. import wallet_pb2
             is_protobuf_loadable = True
         except ImportError:
             is_protobuf_loadable = False
@@ -1003,8 +1007,11 @@ def can_load_coincurve():
 def init_worker(wallet, char_mode, force_purepython, force_kdf_purepython):
     btcrpass.loaded_wallet = None
     btcrpass.init_worker(wallet, char_mode)
-    if force_purepython:     CryptoUtil.load_aes256_library(force_purepython=True)
-    if force_kdf_purepython: CryptoUtil.load_pbkdf2_library(force_purepython=True)
+
+    if force_purepython:
+        CryptoUtil.load_aes256_library(force_purepython=True)
+    if force_kdf_purepython:
+        CryptoUtil.load_pbkdf2_library(force_purepython=True)
 
 
 class Test07WalletDecryption(unittest.TestCase):
@@ -1022,7 +1029,7 @@ class Test07WalletDecryption(unittest.TestCase):
             shutil.copyfile(wallet_filename, temp_wallet_filename)
 
             if android_backuppass:
-                wallet = btcrpass.WalletAndroidSpendingPIN.load_from_filename(
+                wallet = WalletAndroidSpendingPIN.load_from_filename(
                     temp_wallet_filename, tstr(android_backuppass), force_purepython)
             elif blockchain_mainpass:
                 wallet = btcrpass.WalletBlockchainSecondpass.load_from_filename(
@@ -1051,7 +1058,7 @@ class Test07WalletDecryption(unittest.TestCase):
             pool = multiprocessing.Pool(1, init_worker, (wallet, tstr, force_purepython, force_kdf_purepython))
             parent_process = True
             password_found_iterator = pool.imap(btcrpass.return_verified_password_or_false,
-                ( ( tstr("btcr-wrong-password-1"), tstr("btcr-wrong-password-2") ),
+                                                ( ( tstr("btcr-wrong-password-1"), tstr("btcr-wrong-password-2") ),
                   ( tstr("btcr-wrong-password-3"), correct_pass, tstr("btcr-wrong-password-4") ) ))
             self.assertEqual(password_found_iterator.next(), (False, 2))
             self.assertEqual(password_found_iterator.next(), (correct_pass, 2))
@@ -1191,7 +1198,7 @@ class Test07WalletDecryption(unittest.TestCase):
     def test_blockchain_invalid(self):
         # A base64-containing file that's mostly but not entirely encrypted (random)
         with self.assertRaises(ValueError) as cm:
-            btcrpass.WalletBlockchain.load_from_filename(os.path.join(WALLET_DIR, "multibit-wallet.key"))
+            WalletBlockchain.load_from_filename(os.path.join(WALLET_DIR, "multibit-wallet.key"))
         self.assertIn("Doesn't look random enough to be an encrypted Blockchain wallet", cm.exception.args[0])
 
     def test_bitcoincore_pp(self):
@@ -1277,7 +1284,7 @@ class Test08BIP39Passwords(unittest.TestCase):
         # Perform the tests in a child process to ensure the wallet can be pickled and all libraries reloaded
         pool = multiprocessing.Pool(1, init_worker, (wallet, tstr, force_purepython, False))
         password_found_iterator = pool.imap(btcrpass.return_verified_password_or_false,
-            ( ( tstr("btcr-wrong-password-1"), tstr("btcr-wrong-password-2") ),
+                                            ( ( tstr("btcr-wrong-password-1"), tstr("btcr-wrong-password-2") ),
               ( tstr("btcr-wrong-password-3"), correct_pass, tstr("btcr-wrong-password-4") ) ))
         self.assertEqual(password_found_iterator.next(), (False, 2))
         self.assertEqual(password_found_iterator.next(), (correct_pass, 2))

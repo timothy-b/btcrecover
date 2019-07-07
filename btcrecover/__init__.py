@@ -1,2 +1,2 @@
 # for backwards compatibility
-from .btcrpass import *
+from btcrecover.btrcpass.btcrpass import *

@@ -41,9 +41,9 @@ import tempfile
 import unittest
 import warnings
 
-from btcrecover import btcrseed
-from btcrecover.addressset import AddressSet
-from btcrecover.modules.wallets.wallet import Wallet
+from btcrecover.btrseed import btcrseed
+from btcrecover.utilities.addressset import AddressSet
+from btcrecover.btrcpass.wallets.wallet import Wallet
 
 if __name__ == b'__main__':
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -143,46 +143,46 @@ class TestRecoveryFromMPK(unittest.TestCase):
         self.mpk_tester(btcrseed.WalletElectrum2,
             "xpub661MyMwAqRbcGsUXkGBkytQkYZ6M16bFWwTocQDdPSm6eJ1wUsxG5qty1kTCUq7EztwMscUstHVo1XCJMxWyLn4PP1asLjt4gPt3HkA81qe",
             "eagle pair eager human cage forget pony fall robot vague later bright acid",
-            expected_len=13)
+                        expected_len=13)
 
     def test_electrum27(self):
         self.mpk_tester(btcrseed.WalletElectrum2,
             "xpub661MyMwAqRbcGt6qtQ19Ttwvo5Dbf2cQdA2GMf9Xkjth8NqYXXordg3gLK1npATRm9Fr7d7fA5ziCwqEVMmzeRezofp8CEaru8pJ57zV8hN",
             "spot deputy pencil nasty fire boss moral rubber bacon thumb thumb icon",
-            expected_len=12)
+                        expected_len=12)
 
     def test_electrum2_ja(self):
         self.mpk_tester(btcrseed.WalletElectrum2,
             "xpub661MyMwAqRbcFAyy6MaWCK5uGHhgvMZNaFbKy1TbSrcEm8oCgD3N2AfzPC8ndmdvcQbY8EbU414X4xNrs9dcNgcntShiBFJYJ6HJy7zKnQV",
             u"すんぽう うけつけ ぬいくぎ きどう ごはん たかね いてざ よしゅう なにもの われる たんき さとる あじわう",
-            expected_len=13)
+                        expected_len=13)
 
     TEST_ELECTRUM2_PASS_XPUB = "xpub661MyMwAqRbcG4s8buUEpDeeBMZeXxnroY3i9jZJNQuDrWQaCyR5Mvk9pmRK5q5WrEKTwSuYwBiSjcp3ZkM2ujhngFQXxvrTyv2uFCryyii"
     def test_electrum2_pass(self):
         self.mpk_tester(btcrseed.WalletElectrum2,
-            self.TEST_ELECTRUM2_PASS_XPUB,
+                        self.TEST_ELECTRUM2_PASS_XPUB,
             "eagle pair eager human cage forget pony fall robot vague later bright acid",
-            expected_len=13, passphrase=u"btcr test password 测试密码")
+                        expected_len=13, passphrase=u"btcr test password 测试密码")
 
     def test_electrum2_pass_normalize(self):
         p = u" btcr  TEST  ℙáⓢⓢᵂöṝⅆ  测试  密码 "
         assert p == u" btcr  TEST  \u2119\xe1\u24e2\u24e2\u1d42\xf6\u1e5d\u2146  \u6d4b\u8bd5  \u5bc6\u7801 "
         self.mpk_tester(btcrseed.WalletElectrum2,
-            self.TEST_ELECTRUM2_PASS_XPUB,
+                        self.TEST_ELECTRUM2_PASS_XPUB,
             "eagle pair eager human cage forget pony fall robot vague later bright acid",
-            expected_len=13, passphrase=p)
+                        expected_len=13, passphrase=p)
 
     def test_electrum2_pass_wide(self):
         p = u"𝔅tcr 𝔗est 𝔓assword 测试密码"
         assert p == u"\U0001d505tcr \U0001d517est \U0001d513assword \u6d4b\u8bd5\u5bc6\u7801"
         self.mpk_tester(btcrseed.WalletElectrum2,
-            # for narrow Unicode builds, check that we reproduce the same Electrum 2.x bugs:
+                        # for narrow Unicode builds, check that we reproduce the same Electrum 2.x bugs:
             "xpub661MyMwAqRbcGYwDPmhGppsmr2NxcoFNAzGy3qRcE9wrtQhF6tCjtitFnizWKHv684AfshexRAiByRFX3VHpugBcAMYpwQezeYroi53KEKM"
                 if sys.maxunicode < 65536 else
             # for wide Unicode builds, there are no bugs:
             self.TEST_ELECTRUM2_PASS_XPUB,
             "eagle pair eager human cage forget pony fall robot vague later bright acid",
-            expected_len=13, passphrase=p)
+                        expected_len=13, passphrase=p)
 
     def test_bitcoinj(self):
         # an xpub at path m/0', as Bitcoin Wallet for Android/BlackBerry would export
@@ -213,14 +213,14 @@ class TestRecoveryFromMPK(unittest.TestCase):
         self.mpk_tester(btcrseed.WalletBIP39,
             "xpub6D3uXJmdUg4xVnCUkNXJPCkk18gZAB8exGdQeb2rDwC5UJtraHHARSCc2Nz7rQ14godicjXiKxhUn39gbAw6Xb5eWb5srcbkhqPgAqoTMEY",
             "certain come keen collect slab gauge photo inside mechanic deny leader drop",
-            passphrase=u"btcr-test-password")
+                        passphrase=u"btcr-test-password")
 
     def test_bip44_pass_unicode(self):
         # an xpub at path m/44'/0'/0', as Mycelium for Android would export
         self.mpk_tester(btcrseed.WalletBIP39,
             "xpub6CZe1G1A1CaaSepbekLMSk1sBRNA9kHZzEQCedudHAQHHB21FW9fYpQWXBevrLVQfL8JFQVFWEw3aACdr6szksaGsLiHDKyRd1rPJ6ev5ig",
             "certain come keen collect slab gauge photo inside mechanic deny leader drop",
-            passphrase=u"btcr-тест-пароль")
+                        passphrase=u"btcr-тест-пароль")
 
 
 is_sha3_loadable = None
@@ -274,12 +274,12 @@ class TestRecoveryFromAddress(unittest.TestCase):
     def test_electrum2(self):
         self.address_tester(btcrseed.WalletElectrum2, "14dpd9nayyoyCTNki5UUsm1KnAZ1x7o83E", 5,
             "eagle pair eager human cage forget pony fall robot vague later bright acid",
-            expected_len=13)
+                            expected_len=13)
 
     def test_electrum27(self):
         self.address_tester(btcrseed.WalletElectrum2, "1HQrNUBEsEqwEaZZzMqqLqCHSVCGF7dTVS", 5,
             "spot deputy pencil nasty fire boss moral rubber bacon thumb thumb icon",
-            expected_len=12)
+                            expected_len=12)
 
     def test_bitcoinj(self):
         self.address_tester(btcrseed.WalletBitcoinj, "17Czu38CcLwWr8jFZrDJBHWiEDd2QWhPSU", 4,
@@ -416,7 +416,7 @@ class TestRecoveryFromAddressDB(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not os.path.isfile(btcrseed.ADDRESSDB_DEF_FILENAME):
-            raise unittest.SkipTest("requires '"+btcrseed.ADDRESSDB_DEF_FILENAME+"' file in the current directory")
+            raise unittest.SkipTest("requires '" + btcrseed.ADDRESSDB_DEF_FILENAME + "' file in the current directory")
 
     def addressdb_tester(self, wallet_type, the_address_limit, correct_mnemonic, **kwds):
         assert the_address_limit > 1

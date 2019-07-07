@@ -27,7 +27,7 @@
 
 from __future__ import print_function
 
-from btcrecover import addressset
+from btcrecover.utilities import addressset
 import argparse, sys, atexit
 from os import path
 

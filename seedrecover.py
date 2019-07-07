@@ -27,7 +27,7 @@
 
 from __future__ import print_function
 
-from btcrecover import btcrseed
+from btcrecover.btrseed import btcrseed
 import sys, multiprocessing
 
 if __name__ == "__main__":

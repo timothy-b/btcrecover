@@ -27,7 +27,7 @@
 
 from __future__ import print_function
 
-from btcrecover import btcrpass
+from btcrecover.btrcpass import btcrpass
 import sys, multiprocessing
 
 if __name__ == "__main__":

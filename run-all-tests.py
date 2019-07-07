@@ -60,9 +60,9 @@ if __name__ == b'__main__':
     is_coincurve_loadable = test_passwords.can_load_coincurve()
     if is_coincurve_loadable:
         from btcrecover.test     import test_seeds
-        from btcrecover.btcrseed import full_version
+        from btcrecover.btrseed.btcrseed import full_version
     else:
-        from btcrecover.btcrpass import full_version
+        from btcrecover.btrcpass.btcrpass import full_version
 
     # Add two new arguments to those already provided by main()
     parser = argparse.ArgumentParser(add_help=False)
