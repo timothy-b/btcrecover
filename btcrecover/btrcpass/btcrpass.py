@@ -461,12 +461,16 @@ def enable_pause():
 ADDRESSDB_DEF_FILENAME = "addresses.db"  # copied from btrseed
 
 # can raise an exception on some platforms
-try:                  cpus = multiprocessing.cpu_count()
-except StandardError: cpus = 1
+try:
+    cpus = multiprocessing.cpu_count()
+except StandardError:
+    cpus = 1
 
 parser_common = argparse.ArgumentParser(add_help=False)
-prog          = unicode(parser_common.prog)
+prog = unicode(parser_common.prog)
 parser_common_initialized = False
+
+
 def init_parser_common():
     global parser_common, parser_common_initialized, typo_types_group, bip39_group
     if not parser_common_initialized:
@@ -493,6 +497,7 @@ def init_parser_common():
         parser_common.add_argument("--worker",      metavar="ID#/TOTAL#",   help="divide the workload between TOTAL# servers, where each has a different ID# between 1 and TOTAL#")
         parser_common.add_argument("--max-eta",     type=int, default=168,  metavar="HOURS", help="max estimated runtime before refusing to even start (default: %(default)s hours, i.e. 1 week)")
         parser_common.add_argument("--no-eta",      action="store_true",    help="disable calculating the estimated time to completion")
+        parser_common.add_argument("--est-passwords", type=int, default=0, metavar="COUNT", help="number of passwords you estimate your input to contain. used to display progress if --no-eta is enabled")
         parser_common.add_argument("--no-dupchecks", "-d", action="count", default=0, help="disable duplicate guess checking to save memory; specify up to four times for additional effect")
         parser_common.add_argument("--no-progress", action="store_true",   default=not sys.stdout.isatty(), help="disable the progress bar")
         parser_common.add_argument("--android-pin", action="store_true", help="search for the spending pin instead of the backup password in a Bitcoin Wallet for Android/BlackBerry")
@@ -543,6 +548,7 @@ def register_simple_typo(name, help = None):
         return simple_typo_generator  # the decorator returns it unmodified, it just gets registered
     return decorator
 
+
 # Once parse_arguments() has completed, password_generator_factory() will return an iterator
 # (actually a generator object) configured to generate all the passwords requested by the
 # command-line options, and loaded_wallet.return_verified_password_or_false() can check
@@ -567,8 +573,8 @@ def register_simple_typo(name, help = None):
 #                  which should return False if the the item should not be checked.
 #
 # TODO: document kwds usage (as used by unit tests)
-def parse_arguments(effective_argv, wallet = None, base_iterator = None,
-                    perf_iterator = None, inserted_items = None, check_only = None, **kwds):
+def parse_arguments(effective_argv, wallet=None, base_iterator=None,
+                    perf_iterator=None, inserted_items=None, check_only=None, **kwds):
 
     # effective_argv is what we are effectively given, either via the command line, via embedded
     # options in the tokenlist file, or as a result of restoring a session, before any argument
@@ -578,7 +584,8 @@ def parse_arguments(effective_argv, wallet = None, base_iterator = None,
 
     # If no args are present on the command line (e.g. user double-clicked the script
     # in the shell), enable --pause by default so user doesn't miss any error messages
-    if not effective_argv: enable_pause()
+    if not effective_argv:
+        enable_pause()
 
     # Create a parser which can parse any supported option, and run it
     global args
@@ -1732,6 +1739,9 @@ def init_password_generator():
     insert_typos_generator  .func_defaults = (0,)
 
 
+#def shouldPrintProgress()
+
+
 def password_generator(chunksize = 1, only_yield_count = False):
     assert chunksize > 0, "password_generator: chunksize > 0"
     # Used to communicate between typo generators the number of typos that have been
@@ -1741,10 +1751,8 @@ def password_generator(chunksize = 1, only_yield_count = False):
     global typos_sofar
     typos_sofar = 0
 
-    print("password_generator(): chunksize:", chunksize)
-
     passwords_gathered = []
-    passwords_count    = 0  # == len(passwords_gathered)
+    passwords_count = 0  # == len(passwords_gathered)
     worker_count = 0  # Only used if --worker is specified
     new_args = None
 
@@ -1779,6 +1787,10 @@ def password_generator(chunksize = 1, only_yield_count = False):
         # set the min_typos argument default value
         modification_generators[-1].func_defaults = (args.min_typos,)
 
+    total_counted_passwords = 0
+    num_batches_between_updates = 10
+    current_batch_mod = 0
+
     # The base password generator is set in parse_arguments(); it's either an iterable
     # or a generator function (which returns an iterator) that produces base passwords
     # usually based on either a tokenlist file (as parsed above) or a passwordlist file.
@@ -1808,16 +1820,20 @@ def password_generator(chunksize = 1, only_yield_count = False):
         for password in modification_iterator:
 
             # Check the password against the --regex-only and --regex-never options
-            if l_regex_only  and not l_regex_only .search(password): continue
-            if l_regex_never and     l_regex_never.search(password): continue
+            if l_regex_only and not l_regex_only .search(password):
+                continue
+            if l_regex_never and l_regex_never.search(password):
+                continue
 
             # This is the check_only argument optionally passed
             # by external libraries to parse_arguments()
-            if custom_final_checker and not custom_final_checker(password): continue
+            if custom_final_checker and not custom_final_checker(password):
+                continue
 
             # This duplicate check can be disabled via --no-dupchecks
             # because it can take up a lot of memory, sometimes needlessly
-            if l_password_dups and l_password_dups.is_duplicate(password):  continue
+            if l_password_dups and l_password_dups.is_duplicate(password):
+                continue
 
             # Workers in a server pool ignore passwords not assigned to them
             if l_args_worker:
@@ -1835,6 +1851,14 @@ def password_generator(chunksize = 1, only_yield_count = False):
             else:
                 passwords_gathered.append(password)
                 if passwords_count >= chunksize:
+                    total_counted_passwords += passwords_count
+                    current_batch_mod += 1
+                    if current_batch_mod == num_batches_between_updates:
+                        print(str(total_counted_passwords) + "; {:.6f}%"
+                              .format((total_counted_passwords / args.est_passwords) * 100))
+
+                        current_batch_mod %= num_batches_between_updates
+
                     new_args = yield passwords_gathered
                     passwords_gathered = []
                     passwords_count = 0
@@ -2840,7 +2864,7 @@ def password_generator_factory(chunksize = 1, est_secs_per_password = 0):
     try:
         # Iterate though the password counts in increments of size PASSWORDS_BETWEEN_UPDATES
         for passwords_counted_last in passwords_count_iterator:
-            print("password_generator_factory(): got a chunk")
+            # print("password_generator_factory(): got a chunk")
             passwords_counted += passwords_counted_last
             unskipped_passwords_counted = passwords_counted - args.skip
 
@@ -2922,6 +2946,8 @@ def password_generator_factory(chunksize = 1, est_secs_per_password = 0):
 #   the second is a human-readable result iff no password was found; or
 #   returns (None, None) for abnormal but not fatal errors (e.g. Ctrl-C)
 def main():
+
+    start_time = time.time()
 
     # Once installed, performs cleanup prior to a requested process shutdown on Windows
     # (this is defined inside main so it can access the passwords_tried local)
@@ -3069,8 +3095,9 @@ def main():
     # Create an iterator which produces the password permutations in chunks, skipping some if so instructed
     if args.skip > 0:
         print("Starting with password #", args.skip + 1)
+
     password_iterator, skipped_count = password_generator_factory(chunksize)
-    print("got the password_iterator")
+
     if skipped_count < args.skip:
         assert args.no_eta, "discovering all passwords have been skipped this late only happens if --no-eta"
         return False, "Skipped all " +unicode(skipped_count)+" passwords, exiting"
@@ -3133,7 +3160,7 @@ def main():
         set_process_priority_idle()  # this, the only thread, should be nice
     else:
         pool = multiprocessing.Pool(spawned_threads, init_worker, (Wallet.get_loaded_wallet(), mode.tstr))
-        password_found_iterator = pool.imap(return_verified_password_or_false, password_iterator, 1000)
+        password_found_iterator = pool.imap(return_verified_password_or_false, password_iterator, 10)
         if main_thread_is_worker: set_process_priority_idle()  # if this thread is cpu-intensive, be nice
 
     # Try to catch all types of intentional program shutdowns so we can
@@ -3220,5 +3247,10 @@ def main():
     if l_savestate:
         do_autosave(args.skip + passwords_tried)
         autosave_file.close()
+
+    stop_time = time.time()
+
+    print("{:2f} seconds elapsed".format(stop_time - start_time))
+
 
     return (password_found, "Password search exhausted" if password_found is False else None)
