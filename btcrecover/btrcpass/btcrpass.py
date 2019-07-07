@@ -1788,7 +1788,7 @@ def password_generator(chunksize = 1, only_yield_count = False):
         modification_generators[-1].func_defaults = (args.min_typos,)
 
     total_counted_passwords = 0
-    num_batches_between_updates = 10
+    num_batches_between_updates = 1000
     current_batch_mod = 0
 
     # The base password generator is set in parse_arguments(); it's either an iterable
@@ -3160,7 +3160,7 @@ def main():
         set_process_priority_idle()  # this, the only thread, should be nice
     else:
         pool = multiprocessing.Pool(spawned_threads, init_worker, (Wallet.get_loaded_wallet(), mode.tstr))
-        password_found_iterator = pool.imap(return_verified_password_or_false, password_iterator, 10)
+        password_found_iterator = pool.imap(return_verified_password_or_false, password_iterator)
         if main_thread_is_worker: set_process_priority_idle()  # if this thread is cpu-intensive, be nice
 
     # Try to catch all types of intentional program shutdowns so we can
@@ -3191,6 +3191,10 @@ def main():
     # Iterate through password_found_iterator looking for a successful guess
     password_found  = False
     passwords_tried = 0
+
+    num_batches_between_updates = 10
+    batch_num_mod = 0
+
     if progress: progress.start()
     try:
         for password_found, passwords_tried_last in password_found_iterator:
@@ -3210,7 +3214,12 @@ def main():
                     print()  # move down to the line below the progress bar
                 break
             passwords_tried += passwords_tried_last
-            if progress: progress.update(passwords_tried)
+            if progress:
+                batch_num_mod += 1
+                if batch_num_mod == num_batches_between_updates:
+                    batch_num_mod %= num_batches_between_updates
+                    progress.update(passwords_tried)
+
             if l_savestate and passwords_tried % est_passwords_per_5min == 0:
                 do_autosave(args.skip + passwords_tried)
         else:  # if the for loop exits normally (without breaking)
